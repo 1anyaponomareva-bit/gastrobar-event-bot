@@ -23,15 +23,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from google import genai
 from google.genai import types
 
-from config import GEMINI_API_KEY, GEMINI_MODEL
+from config import GEMINI_API_KEY, GEMINI_MODEL, SPORTS_API_KEY
 
 from event_verifier import (
     bar_event_blob,
     clear_fetch_cache,
+    event_from_search_candidate,
     gastrobar_hard_reject,
-    is_valid_source_timezone,
     sort_key_verified,
     verify_event,
+    _parse_time_flexible,
 )
 
 log = logging.getLogger(__name__)
@@ -389,41 +390,47 @@ def _emoji_for_category(cat: str) -> str:
 
 def _validate_concrete_event(raw: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
+        log.info("local_validation_removed: not_a_dict")
         return None
 
     date_s = str(raw.get("date", "")).strip()
     if not _DATE_RE.match(date_s):
-        log.info("skipped_no_date: %s", raw)
+        log.info("local_validation_removed: bad_date raw=%s", raw)
         return None
 
     try:
         d_obj = date.fromisoformat(date_s)
     except ValueError:
-        log.info("skipped_no_date invalid: %s", raw)
+        log.info("local_validation_removed: invalid_date raw=%s", raw)
         return None
 
     time_raw = raw.get("time")
-    if time_raw is None or str(time_raw).strip() == "":
-        log.info("skipped_no_time: %s", raw)
-        return None
-
-    time_s = _normalize_hhmm(str(time_raw))
-    if not time_s:
-        log.info("skipped_invalid_time: %s", raw)
-        return None
+    time_s: str | None = None
+    time_approx = False
+    if time_raw is not None and str(time_raw).strip():
+        time_s, time_approx = _parse_time_flexible(str(time_raw))
+        if not time_s:
+            log.info(
+                "local_validation: unparsed_time title=%s time=%r — пропустим в verify",
+                raw.get("title"),
+                time_raw,
+            )
+            time_s = str(time_raw).strip()
+            time_approx = True
+    else:
+        log.info(
+            "local_validation: no_time title=%s — пропустим в verify (время уточняется)",
+            raw.get("title"),
+        )
+        time_s = ""
 
     title = str(raw.get("title", "")).strip()
     if not title or len(title) < 3:
-        log.info("skipped_no_title: %s", raw)
+        log.info("local_validation_removed: no_title raw=%s", raw)
         return None
 
     subtitle = str(raw.get("subtitle", raw.get("league", ""))).strip()
-    source_timezone = str(raw.get("source_timezone", "")).strip()
-    if not source_timezone:
-        source_timezone = "UTC"
-    elif not is_valid_source_timezone(source_timezone):
-        log.info("skipped_bad_timezone: %s", raw)
-        return None
+    source_timezone = str(raw.get("source_timezone", "")).strip() or "UTC"
 
     tl = title.lower()
     if tl in _ABSTRACT_TITLES:
@@ -451,9 +458,9 @@ def _validate_concrete_event(raw: dict[str, Any]) -> dict[str, Any] | None:
     if gastrobar_hard_reject(cand_pre):
         return None
 
-    return {
+    out = {
         "date": date_s,
-        "time": time_s,
+        "time": time_s or "",
         "weekday": _weekday_ru_for_date(d_obj),
         "category": category,
         "title": title,
@@ -463,6 +470,9 @@ def _validate_concrete_event(raw: dict[str, Any]) -> dict[str, Any] | None:
         "emoji": emoji,
         "source_timezone": source_timezone,
     }
+    if time_approx:
+        out["time_precision"] = "estimated"
+    return out
 
 
 def _event_dedupe_key(e: dict[str, Any]) -> tuple[str, str, str]:
@@ -633,8 +643,19 @@ def fetch_radar_multi_search_sync() -> tuple[list[dict[str, Any]], int, str | No
     return _fetch_radar_combined_once()
 
 
+def _confidence_sort_key(e: dict[str, Any]) -> tuple[int, str, str]:
+    rank = 0 if str(e.get("confidence", "medium")).lower() == "high" else 1
+    sk = sort_key_verified(e)
+    return (rank, sk[0], sk[1])
+
+
 def _select_final_radar_events(verified: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """P1 сначала, затем P2; Eurovision обязателен если есть в verified; мягкий срез слабого хвоста."""
+    """P1 сначала, затем P2; только high/medium confidence; Eurovision в приоритете."""
+    verified = [
+        e
+        for e in verified
+        if str(e.get("confidence", "medium")).lower() in ("high", "medium")
+    ]
     for e in verified:
         if _is_eurovision_event(e) and not str(e.get("subtitle", "")).strip():
             e["subtitle"] = "Music / Live show"
@@ -642,8 +663,8 @@ def _select_final_radar_events(verified: list[dict[str, Any]]) -> list[dict[str,
 
     p1 = [e for e in verified if e.get("radar_priority") == 1]
     p2 = [e for e in verified if e.get("radar_priority") == 2]
-    p1.sort(key=sort_key_verified)
-    p2.sort(key=sort_key_verified)
+    p1.sort(key=_confidence_sort_key)
+    p2.sort(key=_confidence_sort_key)
 
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -688,6 +709,83 @@ def _select_final_radar_events(verified: list[dict[str, Any]]) -> list[dict[str,
     return out[:RADAR_MAX_ITEMS]
 
 
+def _program_item_to_radar_event(item: dict[str, Any]) -> dict[str, Any] | None:
+    if item.get("kind") == "block":
+        d_obj = date.today()
+        date_s = d_obj.isoformat()
+        line = str(item.get("line", "")).strip()
+        if not line:
+            return None
+        return {
+            "date": date_s,
+            "time": "20:00",
+            "weekday": _weekday_ru_for_date(d_obj),
+            "category": "SPORTS",
+            "title": line,
+            "subtitle": line,
+            "league": line,
+            "why": "Подборка API-SPORTS (резерв без Gemini)",
+            "emoji": str(item.get("emoji", "🏟")).strip() or "🏟",
+            "source_timezone": "UTC",
+            "verified_via": "API-SPORTS",
+            "confidence": "high",
+            "radar_priority": 1,
+        }
+
+    date_s = str(item.get("date", "")).strip()
+    if not _DATE_RE.match(date_s):
+        return None
+    try:
+        d_obj = date.fromisoformat(date_s)
+    except ValueError:
+        return None
+    time_s = _normalize_hhmm(str(item.get("time", ""))) or "20:00"
+    title = str(item.get("title", "")).strip()
+    if not title:
+        return None
+    subtitle = str(item.get("league_label_ru", item.get("league_raw", ""))).strip()
+    tier = str(item.get("tier", "high")).lower()
+    return {
+        "date": date_s,
+        "time": time_s,
+        "weekday": _weekday_ru_for_date(d_obj),
+        "category": "FOOTBALL",
+        "title": title,
+        "subtitle": subtitle,
+        "league": subtitle,
+        "why": "Подборка API-SPORTS (резерв без Gemini)",
+        "emoji": "⚽",
+        "source_timezone": "UTC",
+        "verified_via": "API-SPORTS",
+        "confidence": "high",
+        "radar_priority": 1 if tier == "high" else 2,
+    }
+
+
+async def _fallback_events_from_sports_api() -> tuple[list[dict[str, Any]], int]:
+    """Резервная подборка из API-SPORTS, когда Gemini недоступен (429 / квота)."""
+    if not SPORTS_API_KEY:
+        return [], 0
+    from sports_events import get_week_events_with_stats
+
+    program, raw_total, _ = await get_week_events_with_stats()
+    prelim: list[dict[str, Any]] = []
+    for item in program:
+        ev = _program_item_to_radar_event(item)
+        if ev and not gastrobar_hard_reject(ev):
+            prelim.append(ev)
+    if not prelim:
+        return [], raw_total
+    final = _select_final_radar_events(prelim)
+    log.info(
+        "Event Radar sports fallback: raw_api=%s pre=%s final=%s",
+        raw_total,
+        len(prelim),
+        len(final),
+    )
+    return final, raw_total
+
+
 async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, str | None]:
     """
     (события после verify, суммарно сырых JSON из Gemini за все шард-поиски,
@@ -695,8 +793,49 @@ async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, s
     """
     clear_fetch_cache()
     prelim, raw_total, fetch_note = await asyncio.to_thread(fetch_radar_multi_search_sync)
+
+    if fetch_note == "gemini_quota":
+        fallback, fb_raw = await _fallback_events_from_sports_api()
+        if fallback:
+            return fallback, fb_raw, len(fallback), len(fallback), "sports_fallback"
+
     results = await asyncio.gather(*[verify_event(e) for e in prelim])
-    verified_all = [r for r in results if r]
+    verified_all: list[dict[str, Any]] = []
+    verify_dropped = 0
+    for cand, r in zip(prelim, results):
+        if r and str(r.get("confidence", "medium")).lower() in ("high", "medium"):
+            verified_all.append(r)
+        else:
+            verify_dropped += 1
+            if r:
+                log.info(
+                    "verify_skipped_low_confidence: title=%r confidence=%s",
+                    r.get("title"),
+                    r.get("confidence"),
+                )
+            else:
+                log.info(
+                    "verify_removed_in_pipeline: title=%r date=%s time=%s",
+                    cand.get("title"),
+                    cand.get("date"),
+                    cand.get("time"),
+                )
+
+    if not verified_all and prelim:
+        log.warning(
+            "Event Radar: verify dropped all %s Gemini Search candidates; "
+            "applying pass-through (medium confidence)",
+            len(prelim),
+        )
+        for cand in prelim:
+            pt = event_from_search_candidate(
+                cand,
+                confidence="medium",
+                verification_reason="pass_through_after_verify_empty",
+            )
+            if pt:
+                verified_all.append(pt)
+
     for v in verified_all:
         v["radar_priority"] = _bar_priority(v)
 
@@ -718,10 +857,29 @@ async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, s
     final = _select_final_radar_events(pool)
     final = [e for e in final if not gastrobar_hard_reject(e)]
 
+    if prelim and not final:
+        log.warning(
+            "Event Radar: prelim=%s but final empty after selection — last-chance pass-through",
+            len(prelim),
+        )
+        rescue = [
+            event_from_search_candidate(
+                c,
+                confidence="medium",
+                verification_reason="last_chance_pass_through",
+            )
+            for c in prelim[:RADAR_MAX_ITEMS]
+        ]
+        final = [e for e in rescue if e][:RADAR_MAX_ITEMS]
+        for e in final:
+            e["radar_priority"] = max(_bar_priority(e), 1)
+
     log.info(
-        "Event Radar verified: raw_total=%s pre_verify=%s final=%s",
+        "Event Radar verified: raw_total=%s pre_verify=%s kept=%s dropped=%s final=%s",
         raw_total,
         len(prelim),
+        len(verified_all),
+        verify_dropped,
         len(final),
     )
     return final, raw_total, len(prelim), len(final), fetch_note

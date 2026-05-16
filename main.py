@@ -197,9 +197,9 @@ async def run_event_radar_flow(message: Message) -> None:
                 )
             elif raw_total > 0 and pre_count > 0:
                 await message.answer(
-                    "Кандидаты из поиска есть, но после проверки расписания "
-                    "(дата, время, источник) и правил бара в подборку ничего не вошло. "
-                    "Так бывает, если модель не подтвердила время или событие не подходит под фильтры бара."
+                    "Gemini Search нашёл события, но ни одно не подошло под правила бара "
+                    "(сериальные финалы, абстрактные названия без матча и т.п.). "
+                    "Попробуйте /events ещё раз — состав недели мог обновиться."
                 )
             elif raw_total > 0 and pre_count == 0:
                 await message.answer(
@@ -230,8 +230,14 @@ async def run_event_radar_flow(message: Message) -> None:
             "pre_count": pre_count,
             "selected": selected,
         }
+        header = "🔭 Event Radar · Gemini Search"
+        if fetch_note == "sports_fallback":
+            header = (
+                "🔭 Event Radar · API-SPORTS (резерв)\n"
+                "Лимит Gemini исчерпан — показана подборка из спортивного API."
+            )
         text = (
-            "🔭 Event Radar · Gemini Search\n"
+            f"{header}\n"
             f"{_ru_found_events_line(raw_total)}\n"
             f"{_ru_selected_main_line(selected)}\n\n"
             f"{format_radar_afisha(events)}"

@@ -29,11 +29,39 @@ def _process_is_alive(pid: int) -> bool:
         return False
 
 
+def _lock_belongs_to_our_bot(pid: int, project_root: Path) -> bool:
+    """
+    PID в lock-файле должен быть живым python с main.py или cwd проекта.
+    Иначе Windows может переиспользовать PID (например svchost) — ложная блокировка.
+    """
+    if not _process_is_alive(pid):
+        return False
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return False
+    if "python" not in (proc.name() or "").lower():
+        return False
+    try:
+        cmdline = " ".join(proc.cmdline() or []).lower()
+    except (psutil.AccessDenied, psutil.NoSuchProcess):
+        cmdline = ""
+    if "main.py" in cmdline:
+        return True
+    root = project_root.resolve()
+    try:
+        cwd = Path(proc.cwd()).resolve()
+        return cwd == root
+    except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+        return False
+
+
 def try_acquire_bot_lock(lock_path: Path, log: logging.Logger) -> bool:
     """
     Создаёт bot.lock с PID или отказывает, если жива другая копия.
     Возвращает True, если эта копия может работать.
     """
+    project_root = lock_path.parent.resolve()
     while True:
         if not lock_path.exists():
             lock_path.write_text(str(os.getpid()), encoding="utf-8")
@@ -49,13 +77,20 @@ def try_acquire_bot_lock(lock_path: Path, log: logging.Logger) -> bool:
             log.info("stale lock removed")
             continue
 
-        if _process_is_alive(old_pid):
-            log.info("existing bot process detected")
+        if _lock_belongs_to_our_bot(old_pid, project_root):
+            log.info("existing bot process detected (pid=%s)", old_pid)
             print(
                 "Bot is already running. Stop the previous process first.",
                 file=sys.stderr,
             )
             return False
+
+        if _process_is_alive(old_pid):
+            log.warning(
+                "stale lock pid=%s is alive but not this bot (%s); removing lock",
+                old_pid,
+                psutil.Process(old_pid).name(),
+            )
 
         try:
             lock_path.unlink()

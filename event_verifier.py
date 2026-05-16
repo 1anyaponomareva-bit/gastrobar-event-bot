@@ -25,7 +25,12 @@ TARGET_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 _WD_RU = ("ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС")
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?$")
+_APPROX_TIME_PREFIXES = re.compile(
+    r"^(≈|~|around|about|примерно|ориентировочно|circa)\s*",
+    re.I,
+)
+_SHOW_CONFIDENCE = frozenset({"high", "medium"})
 
 _ABSTRACT_TITLES = frozenset(
     x.lower()
@@ -196,12 +201,72 @@ def _emoji_for_category(cat: str) -> str:
 
 
 def _normalize_hhmm(t: str) -> str | None:
-    t = str(t).strip().removeprefix("≈").strip()
+    t = str(t).strip()
+    t = _APPROX_TIME_PREFIXES.sub("", t).strip()
+    t = t.removeprefix("≈").strip()
+    t = re.sub(
+        r"\s*(UTC|GMT|CET|CEST|EST|EDT|PST|PDT|BST|ICT|IST|MSK)\s*$",
+        "",
+        t,
+        flags=re.I,
+    ).strip()
     m = _TIME_RE.match(t)
     if not m:
         return None
     h, mi = int(m.group(1)), m.group(2)
     return f"{h:02d}:{mi}"
+
+
+def _parse_time_flexible(t: str) -> tuple[str | None, bool]:
+    """HH:MM и приблизительные форматы (≈20:00, around 9pm)."""
+    raw = str(t or "").strip()
+    if not raw:
+        return None, False
+    low = raw.lower()
+    if low in ("tbc", "tba", "tbd", "уточняется", "время уточняется"):
+        return None, True
+    is_approx = bool(_APPROX_TIME_PREFIXES.match(raw))
+    cleaned = _APPROX_TIME_PREFIXES.sub("", raw).strip()
+    m12 = re.match(
+        r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
+        cleaned,
+        re.I,
+    )
+    if m12:
+        h = int(m12.group(1)) % 12
+        if m12.group(3).lower() == "pm":
+            h += 12
+        mi = m12.group(2) or "00"
+        return f"{h:02d}:{mi}", True
+    norm = _normalize_hhmm(cleaned)
+    return norm, is_approx
+
+
+def _is_entertainment_category(category: str) -> bool:
+    u = (category or "").upper()
+    if _sport_api_branch(category):
+        return False
+    return any(
+        x in u
+        for x in (
+            "ESPORT",
+            "EUROVISION",
+            "CONCERT",
+            "MUSIC",
+            "GAMING",
+            "GAME",
+            "STREAM",
+            "AWARD",
+            "GRAMMY",
+            "OSCAR",
+            "SHOW",
+            "WWE",
+            "TV",
+            "NETFLIX",
+            "VIRAL",
+            "POP",
+        )
+    )
 
 
 def _resolve_zone(name: str) -> ZoneInfo | None:
@@ -547,6 +612,8 @@ async def _match_apisports(event: dict[str, Any], branch: str) -> dict[str, Any]
         "why": "",
         "time_precision": "exact",
         "verified_via": "API-SPORTS",
+        "confidence": "high",
+        "verification_reason": "api_sports_match",
     }
 
 
@@ -655,78 +722,230 @@ def _gemini_verify_sync(event: dict[str, Any]) -> dict[str, Any] | None:
         "why": str(data.get("source_name", "")).strip(),
         "time_precision": tp,
         "verified_via": "Gemini",
+        "confidence": "high",
+        "verification_reason": "gemini_verify_pass",
     }
+
+
+def _log_verify_removed(title: str, reason: str, event: dict[str, Any]) -> None:
+    missing = []
+    if not str(event.get("date", "")).strip():
+        missing.append("date")
+    if not str(event.get("time", "")).strip():
+        missing.append("time")
+    if not str(event.get("title", "")).strip():
+        missing.append("title")
+    logger.info(
+        "verify_removed: reason=%s title=%r missing_fields=%s event=%s",
+        reason,
+        title,
+        missing or "none",
+        {k: event.get(k) for k in ("date", "time", "title", "category", "source_timezone")},
+    )
+
+
+def event_from_search_candidate(
+    event: dict[str, Any],
+    *,
+    confidence: str = "medium",
+    verified_via: str = "Gemini Search",
+    verification_reason: str = "search_fields_ok",
+) -> dict[str, Any] | None:
+    """
+    Событие из первого прохода Gemini Search — без обязательного второго подтверждения.
+    Достаточно конкретных title + date + (точное или приблизительное) time.
+    """
+    title = str(event.get("title", "")).strip()
+    if not title or len(title) < 3:
+        _log_verify_removed(title, "missing_title", event)
+        return None
+
+    date_s = str(event.get("date", "")).strip()
+    if not _DATE_RE.match(date_s):
+        _log_verify_removed(title, "bad_date", event)
+        return None
+
+    tl = title.lower()
+    if tl in _ABSTRACT_TITLES:
+        _log_verify_removed(title, "abstract_title", event)
+        return None
+    sub0 = str(event.get("subtitle", event.get("league", ""))).strip()
+    if sub0 and tl == sub0.lower():
+        _log_verify_removed(title, "title_equals_subtitle", event)
+        return None
+
+    time_raw = str(event.get("time", "")).strip()
+    time_norm, is_approx = _parse_time_flexible(time_raw)
+    time_precision = "exact"
+    if not time_norm:
+        if time_raw:
+            logger.info(
+                "verify_time_uncertain: title=%r raw_time=%r — показываем «время уточняется»",
+                title,
+                time_raw,
+            )
+        time_norm = "12:00"
+        time_precision = "unknown"
+    elif is_approx:
+        time_precision = "estimated"
+
+    src_tz = str(event.get("source_timezone", "")).strip() or "UTC"
+    if not is_valid_source_timezone(src_tz):
+        logger.info(
+            "verify_tz_fallback_utc: title=%r bad_tz=%r",
+            title,
+            event.get("source_timezone"),
+        )
+        src_tz = "UTC"
+
+    try:
+        conv = convert_to_nha_trang_time(date_s, time_norm, src_tz)
+    except Exception as e:
+        logger.info(
+            "verify_tz_convert_failed: title=%r err=%s — оставляем дату/время из поиска",
+            title,
+            e,
+        )
+        try:
+            d_obj = date.fromisoformat(date_s)
+            conv = {
+                "date": date_s,
+                "time": time_norm,
+                "weekday": _WD_RU[d_obj.weekday()],
+            }
+        except ValueError:
+            _log_verify_removed(title, "date_parse_failed", event)
+            return None
+
+    if time_precision == "unknown":
+        time_display = "время уточняется"
+    elif time_precision == "estimated":
+        time_display = f"≈{conv['time']}"
+    else:
+        time_display = conv["time"]
+
+    cat = str(event.get("category", "EVENT")).strip()[:48] or "EVENT"
+    subtitle = str(event.get("subtitle", event.get("league", ""))).strip()
+    why = str(event.get("why", "")).strip()
+
+    out = {
+        "date": conv["date"],
+        "time": conv["time"],
+        "time_display": time_display,
+        "weekday": conv["weekday"],
+        "category": cat,
+        "title": title,
+        "subtitle": subtitle,
+        "league": subtitle,
+        "emoji": _emoji_for_category(cat),
+        "why": why,
+        "time_precision": time_precision,
+        "verified_via": verified_via,
+        "confidence": confidence,
+        "verification_reason": verification_reason,
+    }
+
+    if gastrobar_hard_reject(out):
+        _log_verify_removed(title, "gastrobar_hard_reject", event)
+        return None
+
+    return out
 
 
 _verify_sem = asyncio.Semaphore(4)
 
 
+def _strict_second_verify_enabled() -> bool:
+    import os
+
+    return os.getenv("RADAR_STRICT_VERIFY", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 async def verify_event(event: dict[str, Any]) -> dict[str, Any] | None:
     """
-    Проверка одного события: API-SPORTS (если подходит категория) иначе Gemini Search.
+  Проверка одного события:
+  - sports: API-SPORTS → confidence high; иначе medium из Gemini Search
+  - entertainment/esports: medium из Gemini Search (без второго verify по умолчанию)
+  - RADAR_STRICT_VERIFY=1 — дополнительно старый жёсткий Gemini verify
     """
     async with _verify_sem:
-        logger.info("VERIFY INPUT: %s", event)
-
-        date_s = str(event.get("date", "")).strip()
-        time_s = str(event.get("time", "")).strip()
         title = str(event.get("title", "")).strip()
         category = str(event.get("category", "")).strip()
+        logger.info("VERIFY INPUT: %s", event)
 
-        if not date_s or not _DATE_RE.match(date_s):
-            logger.info("VERIFY RESULT: None")
-            return None
-        if not time_s or not _normalize_hhmm(time_s):
-            logger.info("VERIFY RESULT: None")
-            return None
-        if not title or len(title) < 3:
-            logger.info("VERIFY RESULT: None")
-            return None
-        if not category:
-            logger.info("VERIFY RESULT: None")
-            return None
-
-        tl = title.lower()
-        if tl in _ABSTRACT_TITLES:
-            logger.info("VERIFY RESULT: None")
-            return None
-        sub0 = str(event.get("subtitle", event.get("league", ""))).strip()
-        if sub0 and tl == sub0.lower():
-            logger.info("VERIFY RESULT: None")
+        if gastrobar_hard_reject(event):
+            _log_verify_removed(title, "gastrobar_hard_reject_input", event)
             return None
 
         out: dict[str, Any] | None = None
         branch = _sport_api_branch(category)
+        api_reason = ""
+
         if branch and SPORTS_API_KEY:
             try:
                 out = await _match_apisports(event, branch)
+                if out:
+                    api_reason = "api_sports_match"
             except Exception:
-                logger.exception("API-SPORTS verify failed")
+                logger.exception("API-SPORTS verify failed for %s", title)
 
-        if out is None:
+        if out is None and _strict_second_verify_enabled():
             try:
                 out = await asyncio.to_thread(_gemini_verify_sync, event)
+                if out:
+                    api_reason = "gemini_strict_verify"
             except Exception:
-                logger.exception("Gemini verify failed")
-                out = None
+                logger.exception("Gemini strict verify failed for %s", title)
 
         if out is None:
-            logger.info("VERIFY RESULT: None")
+            if _is_entertainment_category(category):
+                reason = "entertainment_gemini_search"
+            elif branch:
+                reason = "sport_no_api_match"
+            else:
+                reason = "gemini_search"
+            out = event_from_search_candidate(
+                event,
+                confidence="medium",
+                verified_via="Gemini Search",
+                verification_reason=reason,
+            )
+
+        if out is None:
+            _log_verify_removed(title, "could_not_build_event", event)
             return None
 
-        if gastrobar_hard_reject(out):
-            logger.info("VERIFY RESULT: None (gastrobar_hard_reject)")
+        conf = str(out.get("confidence", "medium")).lower()
+        if conf not in _SHOW_CONFIDENCE:
+            _log_verify_removed(title, f"confidence_{conf}_hidden", event)
             return None
 
         if not out.get("time_display"):
-            out["time_display"] = (
-                f"≈{out['time']}" if out.get("time_precision") == "estimated" else out["time"]
-            )
+            if out.get("time_precision") == "unknown":
+                out["time_display"] = "время уточняется"
+            elif out.get("time_precision") == "estimated":
+                out["time_display"] = f"≈{out['time']}"
+            else:
+                out["time_display"] = out["time"]
 
         if not str(out.get("why", "")).strip():
             out["why"] = str(event.get("why", "")).strip()
 
-        logger.info("VERIFY RESULT: %s", out)
+        if not out.get("verification_reason"):
+            out["verification_reason"] = api_reason or "search_fields_ok"
+
+        logger.info(
+            "VERIFY RESULT: confidence=%s via=%s title=%r reason=%s",
+            out.get("confidence"),
+            out.get("verified_via"),
+            out.get("title"),
+            out.get("verification_reason"),
+        )
         return out
 
 
