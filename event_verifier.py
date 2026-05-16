@@ -140,8 +140,9 @@ You must confirm using reliable web sources:
 * exact event title
 * exact participants (as in official listings)
 * official date (YYYY-MM-DD)
-* official start time (HH:MM in the timezone you specify)
-* source timezone as IANA (e.g. America/Los_Angeles, Europe/London, UTC)
+* official start time (HH:MM) in source timezone — NOT converted to Vietnam
+* source_timezone as IANA only (e.g. Europe/Zurich for Eurovision, America/New_York for UFC US)
+* do NOT return Asia/Ho_Chi_Minh as source_timezone unless the listing is truly Vietnam-local
 * whether the time is exact or estimated (for UFC main event when only approximate, use estimated)
 * reliable source name (short)
 
@@ -290,65 +291,21 @@ def _is_entertainment_category(category: str) -> bool:
 
 
 def _resolve_zone(name: str) -> ZoneInfo | None:
-    n = str(name).strip()
-    if not n:
-        return None
-    aliases = {
-        "ICT": "Asia/Bangkok",
-        "GMT+7": "Asia/Bangkok",
-        "UTC+7": "Asia/Bangkok",
-        "HO_CHI_MINH": "Asia/Ho_Chi_Minh",
-        "VIETNAM": "Asia/Ho_Chi_Minh",
-        "EST": "America/New_York",
-        "PST": "America/Los_Angeles",
-        "CST": "America/Chicago",
-        "CET": "Europe/Paris",
-        "UK": "Europe/London",
-    }
-    key = n.upper().replace(" ", "_")
-    if key in aliases:
-        n = aliases[key]
-    try:
-        return ZoneInfo(n)
-    except Exception:
-        return None
+    from event_time import resolve_zone as _rz
+
+    return _rz(name)
 
 
 def is_valid_source_timezone(name: str) -> bool:
-    return _resolve_zone(name) is not None
+    from event_time import is_valid_source_timezone as _valid
+
+    return _valid(name)
 
 
 def convert_to_nha_trang_time(date_s: str, time_s: str, source_timezone: str) -> dict[str, str]:
-    """
-    Локальная дата+время в source_timezone → дата/время/день недели в Asia/Ho_Chi_Minh.
-    """
-    if not _DATE_RE.match(date_s):
-        raise ValueError("bad date")
-    time_clean = _normalize_hhmm(time_s)
-    if not time_clean:
-        raise ValueError("bad time")
-    zi = _resolve_zone(source_timezone)
-    if zi is None:
-        raise ValueError("bad timezone")
+    from event_time import convert_event_time
 
-    d = date.fromisoformat(date_s)
-    hh, mm = map(int, time_clean.split(":"))
-    local_src = datetime.combine(d, dtime(hh, mm), tzinfo=zi)
-    nt = local_src.astimezone(TARGET_TZ)
-    logger.info(
-        "TIME CONVERTED: %s %s %s -> %s %s %s",
-        date_s,
-        time_clean,
-        source_timezone,
-        nt.date().isoformat(),
-        nt.strftime("%H:%M"),
-        _WD_RU[nt.weekday()],
-    )
-    return {
-        "date": nt.date().isoformat(),
-        "time": nt.strftime("%H:%M"),
-        "weekday": _WD_RU[nt.weekday()],
-    }
+    return convert_event_time(date_s, time_s, source_timezone)
 
 
 def _iso_to_nhatrang(dt_iso: str) -> dict[str, str] | None:
@@ -692,30 +649,28 @@ def _gemini_verify_sync(event: dict[str, Any]) -> dict[str, Any] | None:
         logger.info("verify rejected: %s", data.get("reason", data))
         return None
 
-    src_tz = str(data.get("source_timezone", "")).strip()
-    if not src_tz:
-        logger.info("skipped_no_timezone: %s", data)
+    from event_time import convert_event_to_vn, extract_source_fields
+
+    merged = dict(event)
+    merged["date"] = str(data.get("date", event.get("date", ""))).strip()
+    merged["time"] = str(data.get("time", event.get("time", ""))).strip()
+    merged["source_timezone"] = str(data.get("source_timezone", "")).strip()
+    orig_date, orig_time, orig_tz = extract_source_fields(merged)
+    if data.get("source_timezone"):
+        merged["source_timezone"] = str(data["source_timezone"]).strip()
+
+    conv, time_precision = convert_event_to_vn(merged)
+    if conv is None:
+        logger.info("skipped_no_timezone_or_convert: %s", event.get("title"))
         return None
 
-    date_s = str(data.get("date", "")).strip()
-    time_s = str(data.get("time", "")).strip()
-    if not _DATE_RE.match(date_s):
-        return None
-    time_norm = _normalize_hhmm(time_s)
-    if not time_norm:
-        return None
+    date_s = orig_date or str(data.get("date", "")).strip()
 
-    try:
-        conv = convert_to_nha_trang_time(date_s, time_norm, src_tz)
-    except Exception as e:
-        logger.info("convert_to_nha_trang_time failed: %s", e)
-        return None
-
-    tp = str(data.get("time_precision", "exact")).lower().strip()
-    if tp not in ("exact", "estimated"):
-        tp = "exact"
+    tp = str(data.get("time_precision", time_precision)).lower().strip()
+    if tp not in ("exact", "estimated", "unknown"):
+        tp = time_precision if time_precision in ("exact", "estimated") else "exact"
     tm = conv["time"]
-    disp = tm if tp == "exact" else f"≈{tm}"
+    disp = tm if tp == "exact" else (f"≈{tm}" if tp == "estimated" else "время уточняется")
 
     title = str(data.get("title", "")).strip() or str(event.get("title", "")).strip()
     cat = str(data.get("category", event.get("category", ""))).strip() or "EVENT"
@@ -736,6 +691,10 @@ def _gemini_verify_sync(event: dict[str, Any]) -> dict[str, Any] | None:
         "time": tm,
         "time_display": disp,
         "weekday": conv["weekday"],
+        "original_date": date_s,
+        "original_time": orig_time,
+        "original_timezone": merged.get("source_timezone", orig_tz),
+        "source_timezone": merged.get("source_timezone", orig_tz),
         "category": cat,
         "title": title,
         "subtitle": subtitle,
@@ -776,16 +735,17 @@ def event_from_search_candidate(
     verification_reason: str = "search_fields_ok",
 ) -> dict[str, Any] | None:
     """
-    Событие из первого прохода Gemini Search — без обязательного второго подтверждения.
-    Достаточно конкретных title + date + (точное или приблизительное) time.
+    Событие из Gemini Search: конвертация времени только в Python (event_time).
     """
+    from event_time import convert_event_to_vn, extract_source_fields
+
     title = str(event.get("title", "")).strip()
     if not title or len(title) < 3:
         _log_verify_removed(title, "missing_title", event)
         return None
 
-    date_s = str(event.get("date", "")).strip()
-    if not _DATE_RE.match(date_s):
+    orig_date, orig_time, orig_tz = extract_source_fields(event)
+    if not _DATE_RE.match(orig_date):
         _log_verify_removed(title, "bad_date", event)
         return None
 
@@ -798,65 +758,42 @@ def event_from_search_candidate(
         _log_verify_removed(title, "title_equals_subtitle", event)
         return None
 
-    time_raw = str(event.get("time", "")).strip()
-    time_norm, is_approx = _parse_time_flexible(time_raw)
-    time_precision = "exact"
-    if not time_norm:
-        if time_raw:
-            logger.info(
-                "verify_time_uncertain: title=%r raw_time=%r — показываем «время уточняется»",
-                title,
-                time_raw,
-            )
-        time_norm = "12:00"
-        time_precision = "unknown"
-    elif is_approx:
-        time_precision = "estimated"
+    conv, time_precision = convert_event_to_vn(event)
 
-    src_tz = str(event.get("source_timezone", "")).strip() or "UTC"
-    if not is_valid_source_timezone(src_tz):
-        logger.info(
-            "verify_tz_fallback_utc: title=%r bad_tz=%r",
-            title,
-            event.get("source_timezone"),
-        )
-        src_tz = "UTC"
-
-    try:
-        conv = convert_to_nha_trang_time(date_s, time_norm, src_tz)
-    except Exception as e:
-        logger.info(
-            "verify_tz_convert_failed: title=%r err=%s — оставляем дату/время из поиска",
-            title,
-            e,
-        )
-        try:
-            d_obj = date.fromisoformat(date_s)
-            conv = {
-                "date": date_s,
-                "time": time_norm,
-                "weekday": _WD_RU[d_obj.weekday()],
-            }
-        except ValueError:
-            _log_verify_removed(title, "date_parse_failed", event)
-            return None
-
-    if time_precision == "unknown":
+    if conv is None:
         time_display = "время уточняется"
-    elif time_precision == "estimated":
-        time_display = f"≈{conv['time']}"
+        out_date = orig_date
+        out_time = ""
+        out_weekday = ""
+        try:
+            d_obj = date.fromisoformat(orig_date)
+            out_weekday = _WD_RU[d_obj.weekday()]
+        except ValueError:
+            pass
     else:
-        time_display = conv["time"]
+        out_date = conv["date"]
+        out_time = conv["time"]
+        out_weekday = conv["weekday"]
+        if time_precision == "unknown":
+            time_display = "время уточняется"
+        elif time_precision == "estimated":
+            time_display = f"≈{out_time}"
+        else:
+            time_display = out_time
 
     cat = str(event.get("category", "EVENT")).strip()[:48] or "EVENT"
     subtitle = str(event.get("subtitle", event.get("league", ""))).strip()
     why = str(event.get("why", "")).strip()
 
     out = {
-        "date": conv["date"],
-        "time": conv["time"],
+        "date": out_date,
+        "time": out_time,
         "time_display": time_display,
-        "weekday": conv["weekday"],
+        "weekday": out_weekday,
+        "original_date": orig_date,
+        "original_time": orig_time,
+        "original_timezone": orig_tz,
+        "source_timezone": orig_tz,
         "category": cat,
         "title": title,
         "subtitle": subtitle,

@@ -274,12 +274,21 @@ def _radar_schema_instructions(max_n: int) -> str:
     week = _week_range_human()
     return f"""
 Use Google Search. Return ONLY a JSON array (max {max_n} objects), no markdown, no prose outside JSON.
-Each item: date (YYYY-MM-DD), time (24h HH:MM), source_timezone (IANA), category, title,
-optional subtitle, why_it_matters (one line for a bar big-screen audience in Nha Trang, Vietnam).
+Each item MUST include:
+- date (YYYY-MM-DD) — original local calendar date in source_timezone
+- time (24h HH:MM) — original local wall-clock time in source_timezone (NOT Vietnam, NOT ICT)
+- source_timezone — IANA only (e.g. Europe/Zurich, America/New_York, America/Toronto)
+- category, title, optional subtitle, why_it_matters
 
-Wall-clock date/time MUST be in source_timezone (not Vietnam).
-If the listing does not name a zone but gives a universal/world feed time, set source_timezone to "UTC".
-Prefer returning a concrete row over skipping: only skip a row if you cannot find any credible date+time.
+CRITICAL TIME RULES:
+- Do NOT convert to Asia/Ho_Chi_Minh or Vietnam time yourself.
+- Do NOT output weekday — Python will compute it after conversion.
+- Do NOT use "already converted" or ICT times as source.
+- If official source_timezone is unknown, set source_timezone to "" (empty string) — do not guess UTC.
+- For Eurovision use Europe/Zurich (or host city IANA). For UFC US cards use America/New_York or America/Los_Angeles.
+- For F1 use the circuit's local IANA zone (e.g. America/Toronto for Canada GP).
+
+Prefer returning a concrete row over skipping: only skip if no credible date+time from an official listing.
 
 BAR FILTER — NEVER include:
 - Chicago Med / Chicago Fire / Chicago P.D. / One Chicago (any spelling: PD, P.D., etc.)
@@ -515,7 +524,9 @@ def _validate_concrete_event(raw: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     subtitle = str(raw.get("subtitle", raw.get("league", ""))).strip()
-    source_timezone = str(raw.get("source_timezone", "")).strip() or "UTC"
+    source_timezone = str(
+        raw.get("source_timezone") or raw.get("original_timezone") or ""
+    ).strip()
 
     tl = title.lower()
     if tl in _ABSTRACT_TITLES:
@@ -548,13 +559,16 @@ def _validate_concrete_event(raw: dict[str, Any]) -> dict[str, Any] | None:
     out = {
         "date": date_s,
         "time": time_s or "",
-        "weekday": _weekday_ru_for_date(d_obj),
+        "weekday": "",
         "category": category,
         "title": title,
         "subtitle": subtitle,
         "league": subtitle,
         "why": why,
         "source_timezone": source_timezone,
+        "original_date": date_s,
+        "original_time": time_s or "",
+        "original_timezone": source_timezone,
     }
     out["emoji"] = emoji_for_event(out)
     if time_approx:
