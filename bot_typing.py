@@ -9,6 +9,7 @@ from typing import AsyncIterator
 
 from aiogram import Bot
 from aiogram.enums import ChatAction
+from aiogram.types import Message
 
 log = logging.getLogger(__name__)
 
@@ -22,9 +23,7 @@ async def show_typing(
     *,
     interval_sec: float = _TYPING_REFRESH_SEC,
 ) -> AsyncIterator[None]:
-    """
-    Показывает ChatAction.TYPING и обновляет каждые ~4 с (лимит Telegram).
-  """
+    """ChatAction.TYPING внизу чата, обновление каждые ~4 с."""
 
     async def _loop() -> None:
         while True:
@@ -45,3 +44,51 @@ async def show_typing(
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+
+
+async def _edit_status_safe(msg: Message, text: str) -> None:
+    try:
+        await msg.edit_text(text)
+    except Exception:
+        log.debug("status edit failed", exc_info=True)
+
+
+async def radar_search_progress(status_msg: Message, label: str) -> None:
+    """Обновляет статусное сообщение, пока идёт долгий поиск."""
+    steps = [
+        (12, f"🔍 Ищу: {label}\n✍️ Бот печатает…"),
+        (28, f"🔍 Gemini Search…\n✍️ Бот печатает · ~30 сек"),
+        (50, f"🔍 Проверяю даты и время…\n✍️ Бот печатает · ~1 мин"),
+        (80, f"🔍 Фильтр для бара…\n✍️ Бот печатает · ~1.5 мин"),
+        (115, f"🔍 Почти готово…\n✍️ Бот печатает · подождите ещё немного"),
+    ]
+    for delay, text in steps:
+        await asyncio.sleep(delay)
+        await _edit_status_safe(status_msg, text)
+
+
+@asynccontextmanager
+async def long_operation_typing(
+    bot: Bot,
+    chat_id: int,
+    *,
+    initial_text: str,
+    progress_label: str = "",
+) -> AsyncIterator[Message]:
+    """
+    «Печатает» + стартовое сообщение + периодические обновления статуса.
+    Возвращает Message статуса (можно удалить после успеха).
+    """
+    status_msg = await bot.send_message(chat_id, initial_text)
+    progress_task: asyncio.Task | None = None
+    if progress_label:
+        progress_task = asyncio.create_task(radar_search_progress(status_msg, progress_label))
+
+    async with show_typing(bot, chat_id):
+        try:
+            yield status_msg
+        finally:
+            if progress_task:
+                progress_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await progress_task

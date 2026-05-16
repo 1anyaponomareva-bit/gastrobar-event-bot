@@ -14,7 +14,7 @@ def radar_menu_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="⚡ События сейчас / 24 часа",
+                    text="⚡ События ближайших 24 часов",
                     callback_data="radar:now24",
                 ),
             ],
@@ -33,7 +33,7 @@ def radar_week_result_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="🔄 Обновить",
+                    text="🔄 Обновить неделю",
                     callback_data="radar:week",
                 ),
             ],
@@ -53,12 +53,12 @@ def radar_now24_result_kb() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="📋 Сгенерировать пост на сегодня",
-                    callback_data="radar:now24:gen",
+                    callback_data="radar:post_now24",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="🔄 Обновить",
+                    text="🔄 Обновить 24 часа",
                     callback_data="radar:now24",
                 ),
             ],
