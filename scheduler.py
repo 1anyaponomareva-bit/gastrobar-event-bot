@@ -13,12 +13,11 @@ from zoneinfo import ZoneInfo
 from config import ADMIN_ID
 from database import replace_week_events
 from keyboards import daily_alert_kb, week_actions_kb
+from daily_event import fetch_week_events_for_daily, get_next_featured_event
 from event_radar import (
     format_radar_scheduler_summary,
     get_event_radar_week,
-    important_today_tomorrow_radar,
     radar_events_to_db_rows,
-    spotlight_line_radar,
 )
 
 log = logging.getLogger(__name__)
@@ -53,14 +52,26 @@ async def _send_weekly_afisha(bot: Bot) -> None:
 
 
 async def _send_daily_if_needed(bot: Bot) -> None:
-    events, _, _, _, _ = await get_event_radar_week()
-    hot = important_today_tomorrow_radar(events)
-    if not hot:
+    """Пост дня: одно featured-событие (~24 ч), не weekly radar."""
+    pool = await fetch_week_events_for_daily()
+    featured = get_next_featured_event(pool)
+    if not featured:
         set_pending_daily(None)
         return
-    set_pending_daily(hot)
-    line = spotlight_line_radar(hot)
-    msg = "Event Radar — повод на сегодня/завтра: " + line
+    set_pending_daily([featured])
+    timing = str(featured.get("daily_timing_phrase", "")).strip()
+    title = str(featured.get("title", "")).strip()
+    display = str(
+        featured.get("display_time")
+        or featured.get("time_display")
+        or featured.get("time", "")
+    ).strip()
+    msg = (
+        "🔥 Пост дня — отдельная кампания (не недельная афиша)\n\n"
+        f"{title}\n"
+        f"Когда: {timing}"
+        + (f" · {display}" if display else "")
+    )
     await bot.send_message(
         ADMIN_ID,
         msg,

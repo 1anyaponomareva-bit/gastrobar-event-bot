@@ -43,6 +43,17 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS draft_assets (
+                draft_id INTEGER PRIMARY KEY,
+                image_path TEXT NOT NULL,
+                event_json TEXT NOT NULL,
+                poster_source TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (draft_id) REFERENCES drafts(id)
+            )
+            """
+        )
         await db.commit()
 
 
@@ -114,6 +125,12 @@ async def get_draft(draft_id: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+async def update_draft_text(draft_id: int, text: str) -> None:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("UPDATE drafts SET text = ? WHERE id = ?", (text, draft_id))
+        await db.commit()
+
+
 async def update_draft_status(draft_id: int, status: str) -> None:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute(
@@ -125,3 +142,36 @@ async def update_draft_status(draft_id: int, status: str) -> None:
 
 async def serialize_events_for_prompt(events: list[dict[str, Any]]) -> str:
     return json.dumps(events, ensure_ascii=False, indent=2)
+
+
+async def upsert_draft_asset(
+    draft_id: int,
+    *,
+    image_path: str,
+    event_json: str,
+    poster_source: str = "",
+) -> None:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO draft_assets (draft_id, image_path, event_json, poster_source)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(draft_id) DO UPDATE SET
+                image_path=excluded.image_path,
+                event_json=excluded.event_json,
+                poster_source=excluded.poster_source
+            """,
+            (draft_id, image_path, event_json, poster_source),
+        )
+        await db.commit()
+
+
+async def get_draft_asset(draft_id: int) -> dict[str, Any] | None:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT draft_id, image_path, event_json, poster_source FROM draft_assets WHERE draft_id = ?",
+            (draft_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    return dict(row) if row else None

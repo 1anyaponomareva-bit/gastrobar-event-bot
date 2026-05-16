@@ -20,10 +20,9 @@ from typing import Any
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from google import genai
-from google.genai import types
-
-from config import GEMINI_API_KEY, GEMINI_MODEL, SPORTS_API_KEY
+from bar_hours import filter_events_for_bar_hours, is_f1_excluded_event
+from config import GEMINI_API_KEY, SPORTS_API_KEY
+from gemini_client import effective_gemini_model, generate_radar_content_sync, log_gemini_error
 
 from event_verifier import (
     bar_event_blob,
@@ -37,11 +36,11 @@ from event_verifier import (
 
 log = logging.getLogger(__name__)
 
-RADAR_MAX_ITEMS = 7
+RADAR_MAX_ITEMS = 6
 # Сколько кандидатов запросить у Gemini до verify (для разнообразия категорий).
 RADAR_PER_SEARCH_MAX = 4
-# Жёсткий минимум сильных событий не форсируем; максимум 7, лучше меньше слабых P2 в хвосте.
-RADAR_SOFT_CAP_WEAK_P2 = 5
+# В афишу только события с radar_tier < RADAR_TIER_LOW (без добивания слабым хвостом).
+RADAR_TIER_LOW = 20
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?$")
@@ -84,7 +83,7 @@ def _is_eurovision_event(e: dict[str, Any]) -> bool:
     return "eurovision" in bar_event_blob(e)
 
 
-def _bar_priority(e: dict[str, Any]) -> int:
+def _bar_priority_heuristic(e: dict[str, Any]) -> int:
     """
     1 = приоритет для бара (UCL, UFC, F1, Eurovision, плей-офф NBA/NHL, топ-бокс, мейджор-кибер).
     2 = допустимо (WWE/AEW крупное, большие концерты/стримы, шоукейсы, премии, вирусные эфиры).
@@ -186,6 +185,89 @@ def _bar_priority(e: dict[str, Any]) -> int:
     return 0
 
 
+def _enrich_ufc_for_afisha(e: dict[str, Any]) -> dict[str, Any]:
+    """Main Card: без точного времени главного боя, только старт карда."""
+    b = bar_event_blob(e)
+    if not re.search(r"\bufc\b|\bone\s+championship\b", b):
+        return e
+    title = str(e.get("title", "")).strip()
+    has_bout = bool(re.search(r"\bvs\.?\b|\s—\s|\s-\s", title, re.I))
+    is_main = "main card" in b or "main event" in b
+
+    if not (is_main or has_bout):
+        return e
+
+    e["subtitle"] = "Main Card"
+    e["league"] = "Main Card"
+    if has_bout:
+        e["ufc_main_note"] = "Главный бой ориентировочно позже"
+    if str(e.get("time_precision", "")) != "unknown":
+        e["time_precision"] = "estimated"
+    td = str(e.get("display_time") or e.get("time_display") or e.get("time", "")).strip()
+    if td and td != "время уточняется" and not td.startswith("≈"):
+        e["time_display"] = f"≈{td}"
+        if e.get("display_time"):
+            e["display_time"] = td
+    return e
+
+
+def _bar_tier(e: dict[str, Any]) -> int:
+    """Меньше = выше приоритет в афише. 99 = не показывать."""
+    if gastrobar_hard_reject(e) or is_f1_excluded_event(e):
+        return 99
+    b = bar_event_blob(e)
+
+    if "eurovision" in b:
+        if re.search(r"grand\s+final", b) or (
+            re.search(r"\bfinal\b", b) and "semi" not in b
+        ):
+            return 0
+        if re.search(r"semi", b):
+            return 1
+        return 2
+
+    if re.search(r"\bufc\b", b):
+        if "main card" in b or "main event" in b:
+            return 3
+        if re.search(r"\bvs\.?\b|\s—\s", str(e.get("title", "")), re.I):
+            return 3
+        return 28
+
+    if "nba" in b and re.search(r"conference\s+final", b):
+        return 4
+    if "nba" in b and re.search(r"playoff|finals", b):
+        return 5
+
+    if re.search(r"stanley|nhl", b) and re.search(r"conference\s+final", b):
+        return 6
+    if "stanley" in b or ("nhl" in b and re.search(r"playoff", b)):
+        return 7
+
+    if re.search(r"formula\s*1|\bf1\b", b):
+        return 8
+
+    if re.search(r"\bucl\b|champions\s+league|uefa\s+champions", b):
+        return 9
+    if re.search(r"europa\s+league|\buel\b|\buecl\b|conference\s+league", b):
+        return 10
+
+    legacy = _bar_priority_heuristic(e)
+    if legacy == 1:
+        return 12
+    if legacy == 2:
+        return 25
+    return 99
+
+
+def _bar_priority(e: dict[str, Any]) -> int:
+    tier = _bar_tier(e)
+    if tier >= 99:
+        return 0
+    if tier < RADAR_TIER_LOW:
+        return 1
+    return 2
+
+
 def _radar_schema_instructions(max_n: int) -> str:
     today = _today_iso()
     week = _week_range_human()
@@ -201,6 +283,8 @@ Prefer returning a concrete row over skipping: only skip a row if you cannot fin
 BAR FILTER — NEVER include:
 - Chicago Med / Chicago Fire / Chicago P.D. / One Chicago (any spelling: PD, P.D., etc.)
 - US network procedural season/series finales (NBC/CBS/ABC/Fox/CW), ordinary episodic TV finales
+- Formula 1 Practice / Free Practice / FP1 / FP2 / FP3 (ONLY Qualifying, Sprint, Race, Grand Prix)
+- UFC prelims without Main Card — prefer one row per card: title + "Main Card", no exact main-fight time
 - anything not suitable for a crowded bar TV night
 
 Today: {today}
@@ -458,6 +542,10 @@ def _validate_concrete_event(raw: dict[str, Any]) -> dict[str, Any] | None:
     if gastrobar_hard_reject(cand_pre):
         return None
 
+    if is_f1_excluded_event(cand_pre):
+        log.info("local_validation_removed: f1_practice title=%s", title)
+        return None
+
     out = {
         "date": date_s,
         "time": time_s or "",
@@ -485,26 +573,16 @@ def _gemini_fetch_validated_sync(
     *,
     log_label: str,
     max_attempts: int = 3,
+    use_search: bool = True,
 ) -> tuple[list[dict[str, Any]], int]:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY обязателен для Event Radar")
 
+    mode = "search" if use_search else "plain"
     last_err: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            config = types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-            )
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=config,
-            )
-            text = (response.text or "").strip()
-            if not text:
-                raise RuntimeError("Пустой ответ Gemini (Event Radar)")
-
+            text = generate_radar_content_sync(prompt, use_search=use_search)
             raw_list = _extract_json_array(text)
             raw_total = len(raw_list)
 
@@ -517,12 +595,14 @@ def _gemini_fetch_validated_sync(
                     validated.append(v)
 
             log.info(
-                "%s: raw=%s pre_verify=%s sample=%s (attempt %s)",
+                "%s (%s): raw=%s pre_verify=%s sample=%s (attempt %s) model=%s",
                 log_label,
+                mode,
                 raw_total,
                 len(validated),
                 [(x.get("date"), x.get("time"), x.get("title")) for x in validated[:3]],
                 attempt,
+                effective_gemini_model(),
             )
             if raw_total > 0 and not validated and attempt < max_attempts:
                 log.warning(
@@ -536,10 +616,16 @@ def _gemini_fetch_validated_sync(
         except Exception as e:
             if _is_gemini_free_quota_error(e):
                 raise
+            if use_search:
+                log.error("Gemini Search error", exc_info=True)
+                log_gemini_error(f"{log_label}_search", e)
+            else:
+                log_gemini_error(f"{log_label}_plain", e)
             last_err = e
             log.warning(
-                "Event Radar shard %s attempt %s/%s failed: %s",
+                "Event Radar shard %s (%s) attempt %s/%s failed: %s",
                 log_label,
+                mode,
                 attempt,
                 max_attempts,
                 e,
@@ -549,6 +635,49 @@ def _gemini_fetch_validated_sync(
     if last_err:
         raise last_err
     raise RuntimeError("Event Radar shard exhausted retries")
+
+
+def _gemini_fetch_with_search_fallback(
+    prompt: str,
+    *,
+    log_label: str,
+    max_attempts: int = 2,
+) -> tuple[list[dict[str, Any]], int, str | None]:
+    """
+    Сначала Google Search; при ошибке (не 429) — plain Gemini без Search.
+    Возвращает (кандидаты, raw_count, fetch_note).
+    """
+    try:
+        prelim, raw = _gemini_fetch_validated_sync(
+            prompt,
+            log_label=log_label,
+            max_attempts=max_attempts,
+            use_search=True,
+        )
+        return prelim, raw, None
+    except Exception as e:
+        if _is_gemini_free_quota_error(e):
+            raise
+        log.error("Gemini Search error", exc_info=True)
+        log_gemini_error(f"{log_label}_search_fallback", e)
+        log.warning(
+            "%s: Google Search failed (%s), fallback to plain Gemini",
+            log_label,
+            type(e).__name__,
+        )
+    try:
+        prelim, raw = _gemini_fetch_validated_sync(
+            prompt,
+            log_label=f"{log_label}_plain",
+            max_attempts=1,
+            use_search=False,
+        )
+        return prelim, raw, "search_fallback"
+    except Exception as e:
+        if _is_gemini_free_quota_error(e):
+            raise
+        log_gemini_error(f"{log_label}_plain_failed", e)
+        raise
 
 
 def _dedupe_radar_candidates(merged: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -568,10 +697,11 @@ def _fetch_radar_multi_search_sharded() -> tuple[list[dict[str, Any]], int, str 
     total_raw = 0
     merged: list[dict[str, Any]] = []
     shard_failures = 0
+    fetch_note: str | None = None
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {
             pool.submit(
-                _gemini_fetch_validated_sync,
+                _gemini_fetch_with_search_fallback,
                 prompt,
                 log_label=label,
                 max_attempts=1,
@@ -581,14 +711,17 @@ def _fetch_radar_multi_search_sharded() -> tuple[list[dict[str, Any]], int, str 
         for fut in as_completed(futures):
             label = futures[fut]
             try:
-                prelim, raw = fut.result()
+                prelim, raw, note = fut.result()
             except Exception as e:
                 if _is_gemini_free_quota_error(e):
                     log.error("Event Radar shard %s: Gemini quota: %s", label, e)
                     return [], 0, "gemini_quota"
-                log.error("Event Radar shard %s failed: %s", label, e)
+                log.error("Gemini Search error", exc_info=True)
+                log_gemini_error(f"shard_{label}", e)
                 shard_failures += 1
                 continue
+            if note == "search_fallback":
+                fetch_note = note
             total_raw += raw
             merged.extend(prelim)
 
@@ -602,13 +735,13 @@ def _fetch_radar_multi_search_sharded() -> tuple[list[dict[str, Any]], int, str 
     )
     if not deduped and total_raw == 0 and shard_failures >= len(prompts):
         return deduped, total_raw, "gemini_error"
-    return deduped, total_raw, None
+    return deduped, total_raw, fetch_note
 
 
 def _fetch_radar_combined_once() -> tuple[list[dict[str, Any]], int, str | None]:
     max_n = min(max(RADAR_PER_SEARCH_MAX * 3, 12), 18)
     try:
-        prelim, raw_total = _gemini_fetch_validated_sync(
+        prelim, raw_total, fetch_note = _gemini_fetch_with_search_fallback(
             _radar_combined_prompt(max_n),
             log_label="radar_combined",
             max_attempts=2,
@@ -617,16 +750,19 @@ def _fetch_radar_combined_once() -> tuple[list[dict[str, Any]], int, str | None]
         if _is_gemini_free_quota_error(e):
             log.error("Event Radar combined: Gemini quota exhausted: %s", e)
             return [], 0, "gemini_quota"
-        log.exception("Event Radar combined failed: %s", e)
+        log.error("Gemini Search error", exc_info=True)
+        log_gemini_error("radar_combined_fatal", e)
         return [], 0, "gemini_error"
 
     deduped = _dedupe_radar_candidates(prelim)
     log.info(
-        "Event Radar combined: merged_pre=%s raw_sum=%s",
+        "Event Radar combined: merged_pre=%s raw_sum=%s fetch_note=%s model=%s",
         len(deduped),
         raw_total,
+        fetch_note,
+        effective_gemini_model(),
     )
-    return deduped, raw_total, None
+    return deduped, raw_total, fetch_note
 
 
 def fetch_radar_multi_search_sync() -> tuple[list[dict[str, Any]], int, str | None]:
@@ -649,63 +785,69 @@ def _confidence_sort_key(e: dict[str, Any]) -> tuple[int, str, str]:
     return (rank, sk[0], sk[1])
 
 
+def _tier_sort_key(e: dict[str, Any]) -> tuple[int, int, str, str]:
+    tier = int(e.get("radar_tier", 99))
+    return (tier, *_confidence_sort_key(e))
+
+
+def _prepare_for_afisha_selection(e: dict[str, Any]) -> dict[str, Any]:
+    e = _enrich_ufc_for_afisha(e)
+    tier = _bar_tier(e)
+    e["radar_tier"] = tier
+    if tier < RADAR_TIER_LOW:
+        e["radar_priority"] = 1
+    elif tier < 99:
+        e["radar_priority"] = 2
+    else:
+        e["radar_priority"] = 0
+    if _is_eurovision_event(e) and not str(e.get("subtitle", "")).strip():
+        e["subtitle"] = "Music / Live show"
+        e["league"] = e["subtitle"]
+    return e
+
+
 def _select_final_radar_events(verified: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """P1 сначала, затем P2; только high/medium confidence; Eurovision в приоритете."""
+    """
+    До RADAR_MAX_ITEMS (6), по radar_tier без добивания слабым хвостом.
+    Приоритет: Eurovision → UFC Main Card → NBA/NHL finals → F1 → UCL/UEL.
+    """
     verified = [
         e
         for e in verified
         if str(e.get("confidence", "medium")).lower() in ("high", "medium")
     ]
-    for e in verified:
-        if _is_eurovision_event(e) and not str(e.get("subtitle", "")).strip():
-            e["subtitle"] = "Music / Live show"
-            e["league"] = e["subtitle"]
-
-    p1 = [e for e in verified if e.get("radar_priority") == 1]
-    p2 = [e for e in verified if e.get("radar_priority") == 2]
-    p1.sort(key=_confidence_sort_key)
-    p2.sort(key=_confidence_sort_key)
+    prepared = [_prepare_for_afisha_selection(dict(e)) for e in verified]
+    eligible = [e for e in prepared if int(e.get("radar_tier", 99)) < RADAR_TIER_LOW]
+    eligible.sort(key=_tier_sort_key)
 
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
-    for bucket in (p1, p2):
-        for e in bucket:
-            k = _event_dedupe_key(e)
-            if k in seen:
-                continue
-            seen.add(k)
-            out.append(e)
-            if len(out) >= RADAR_MAX_ITEMS:
-                break
+    for e in eligible:
         if len(out) >= RADAR_MAX_ITEMS:
             break
+        k = _event_dedupe_key(e)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(e)
 
-    euro_pool = [e for e in verified if _is_eurovision_event(e)]
-    if euro_pool:
-        best_e = sorted(euro_pool, key=sort_key_verified)[0]
+    euro_top = [e for e in prepared if _is_eurovision_event(e) and e.get("radar_tier", 99) <= 2]
+    if euro_top:
+        best_e = sorted(euro_top, key=_tier_sort_key)[0]
         k0 = _event_dedupe_key(best_e)
         if not any(_event_dedupe_key(x) == k0 for x in out):
             if len(out) < RADAR_MAX_ITEMS:
                 out.append(best_e)
-            else:
-                replaced = False
-                for i in range(len(out) - 1, -1, -1):
-                    if out[i].get("radar_priority") == 2:
-                        out[i] = best_e
-                        replaced = True
-                        break
-                if not replaced:
-                    out[-1] = best_e
+            elif out and int(out[-1].get("radar_tier", 99)) >= int(best_e.get("radar_tier", 0)):
+                out[-1] = best_e
 
     out.sort(key=sort_key_verified)
-
-    if len(out) > RADAR_SOFT_CAP_WEAK_P2:
-        n_p1 = sum(1 for x in out if x.get("radar_priority") == 1)
-        if n_p1 >= 2:
-            while len(out) > RADAR_SOFT_CAP_WEAK_P2 and out and out[-1].get("radar_priority") == 2:
-                out.pop()
-
-    out.sort(key=sort_key_verified)
+    log.info(
+        "afisha selection: eligible=%s selected=%s tiers=%s",
+        len(eligible),
+        len(out),
+        [e.get("radar_tier") for e in out],
+    )
     return out[:RADAR_MAX_ITEMS]
 
 
@@ -836,10 +978,12 @@ async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, s
             if pt:
                 verified_all.append(pt)
 
-    for v in verified_all:
-        v["radar_priority"] = _bar_priority(v)
+    verified_all = filter_events_for_bar_hours(verified_all)
 
-    verified_prio = [v for v in verified_all if v.get("radar_priority", 0) >= 1]
+    for v in verified_all:
+        _prepare_for_afisha_selection(v)
+
+    verified_prio = [v for v in verified_all if int(v.get("radar_tier", 99)) < RADAR_TIER_LOW]
     if verified_prio:
         pool = verified_prio
     else:
@@ -870,9 +1014,9 @@ async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, s
             )
             for c in prelim[:RADAR_MAX_ITEMS]
         ]
-        final = [e for e in rescue if e][:RADAR_MAX_ITEMS]
+        final = filter_events_for_bar_hours([e for e in rescue if e])[:RADAR_MAX_ITEMS]
         for e in final:
-            e["radar_priority"] = max(_bar_priority(e), 1)
+            _prepare_for_afisha_selection(e)
 
     log.info(
         "Event Radar verified: raw_total=%s pre_verify=%s kept=%s dropped=%s final=%s",
@@ -893,13 +1037,21 @@ def format_radar_afisha(events: list[dict[str, Any]]) -> str:
     for e in events:
         em = str(e.get("emoji", "🏟")).strip()
         wd = str(e.get("weekday", "")).strip()
-        tm = str(e.get("time_display") or e.get("time", "")).strip()
+        tm = str(
+            e.get("display_time") or e.get("time_display") or e.get("time", "")
+        ).strip()
         title = str(e.get("title", "")).strip()
         sub = str(e.get("subtitle", e.get("league", ""))).strip()
+        note = str(e.get("note", "")).strip()
+        ufc_note = str(e.get("ufc_main_note", "")).strip()
         lines.append(f"{em} {wd} {tm}")
         lines.append(title)
         if sub and sub.lower() != title.lower():
             lines.append(sub)
+        if ufc_note:
+            lines.append(ufc_note)
+        elif note:
+            lines.append(note)
         lines.append("")
     lines.append("📍Океанус, улица с траками")
     return "\n".join(lines).strip()
@@ -936,10 +1088,16 @@ def format_radar_scheduler_summary(events: list[dict[str, Any]]) -> str:
     lines: list[str] = []
     for e in events:
         sub = e.get("subtitle", e.get("league", ""))
-        tm = str(e.get("time_display") or e.get("time", "")).strip()
+        tm = str(
+            e.get("display_time") or e.get("time_display") or e.get("time", "")
+        ).strip()
+        note = str(e.get("note", "")).strip()
+        sub_part = sub
+        if note and note.lower() not in str(sub).lower():
+            sub_part = f"{sub} — {note}" if sub else note
         lines.append(
             f"{e.get('emoji', '•')} {e.get('weekday', '')} {tm} — "
-            f"{e.get('title', '')}" + (f" ({sub})" if str(sub).strip() else "")
+            f"{e.get('title', '')}" + (f" ({sub_part})" if str(sub_part).strip() else "")
         )
         if e.get("why"):
             lines.append(f"   → {e['why']}")
@@ -960,7 +1118,7 @@ def important_today_tomorrow_radar(events: list[dict[str, Any]]) -> list[dict[st
 
 def spotlight_line_radar(events: list[dict[str, Any]]) -> str:
     parts = [
-        f"{e.get('weekday', '')} {e.get('time_display') or e.get('time', '')} {e.get('title', '')}"
+        f"{e.get('weekday', '')} {e.get('display_time') or e.get('time_display') or e.get('time', '')} {e.get('title', '')}"
         for e in events[:4]
     ]
     return "; ".join(p for p in parts if p.strip())

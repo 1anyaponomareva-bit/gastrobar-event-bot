@@ -163,3 +163,50 @@ async def generate_weekly_poster(events: list[dict]) -> str:
 async def generate_week_post(events: list[dict]) -> str:
     """Совместимость со старым именем."""
     return await generate_weekly_poster(events)
+
+
+def _generate_daily_event_post_sync(event: dict) -> str:
+    event_json = json.dumps(event, ensure_ascii=False, indent=2)
+    timing = str(event.get("daily_timing_phrase", "скоро")).strip()
+    display_time = str(
+        event.get("display_time") or event.get("time_display") or event.get("time", "")
+    ).strip()
+    note = str(event.get("note", "")).strip()
+    ufc_note = str(event.get("ufc_main_note", "")).strip()
+    em = str(event.get("emoji", "🏟")).strip()
+
+    prompt = f"""{STYLE_SYSTEM}
+
+Напиши ОДИН короткий пост для Telegram — «пост дня» Gastrobar про ОДНО конкретное событие.
+Это НЕ недельная афиша, а кампания на ближайший эфир.
+
+Тон: атмосферный, приглашающий, без канцелярита, без вопросов читателю.
+Длина: 300–700 символов, не больше.
+
+Структура (гибко):
+- цепляющий заход с эмодзи {em} и событием ({timing});
+- 1–2 предложения — что смотрим на большом экране, название боя/матча из JSON;
+- блок из 2–4 коротких строк про бар (пиво, настойки, атмосфера — своими словами);
+- если в JSON есть note «показываем с открытия» — упомяни начало с {display_time} / открытия;
+- если есть ufc_main_note — не указывай точное время главного боя, только main card;
+- заверши строкой «📍Океанус, улица с траками».
+
+Не перечисляй другие события недели. Без хэштегов.
+
+Событие (JSON):
+{event_json}
+"""
+    client = _client()
+    response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    text = (response.text or "").strip()
+    if not text:
+        raise RuntimeError("Пустой ответ Gemini (daily post)")
+    if len(text) > 700:
+        text = text[:697].rstrip() + "..."
+    if "Океанус" not in text:
+        text = text.rstrip() + "\n\n📍Океанус, улица с траками"
+    return text
+
+
+async def generate_daily_event_post(event: dict) -> str:
+    return await asyncio.to_thread(_generate_daily_event_post_sync, event)
