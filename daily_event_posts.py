@@ -158,6 +158,16 @@ async def build_daily_content_package(
         )
 
         verified, verified_ok, time_ok = await verify_events_for_daily(now24)
+        from daily_tv import apply_tv_limit_for_digest
+
+        verified, skipped_tv = apply_tv_limit_for_digest(verified)
+        if skipped_tv:
+            log.info(
+                "%s tv_limit: kept=%s skipped=%s",
+                log_prefix,
+                len(verified),
+                len(skipped_tv),
+            )
         if not verified:
             log.error("%s verification failed: empty after verify", log_prefix)
             return DailyBuildResult(
@@ -178,6 +188,10 @@ async def build_daily_content_package(
         try:
             if len(post_events) == 1:
                 post_text = await generate_daily_event_post(post_events[0])
+            elif len(post_events) == 2:
+                from daily_tv import format_dual_screen_daily_post
+
+                post_text = format_dual_screen_daily_post(post_events)
             else:
                 post_text = await generate_daily_campaign_post(post_events)
             if not (post_text or "").strip():

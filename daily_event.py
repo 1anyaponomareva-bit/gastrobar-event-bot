@@ -67,24 +67,24 @@ def campaign_post_date(e: dict[str, Any]) -> date | None:
 
 
 def _daily_priority_score(e: dict[str, Any]) -> int:
-    """Меньше = важнее для поста дня."""
+    """Меньше = важнее для поста дня (UFC → Eurovision → UCL → …)."""
     b = bar_event_blob(e)
-    if "eurovision" in b:
-        return 1
     if re.search(r"\bufc\b", b):
         if "main card" in b or "main event" in b or re.search(
             r"\bvs\.?\b", str(e.get("title", "")), re.I
         ):
-            return 2
-    if "nba" in b and re.search(r"playoff|final|conference", b):
+            return 1
+    if "eurovision" in b:
+        return 2
+    if re.search(r"\bucl\b|champions\s+league|uefa\s+champions", b):
         return 3
-    if "stanley" in b or ("nhl" in b and re.search(r"playoff|final|conference", b)):
+    if "nba" in b and re.search(r"playoff|final|conference", b):
         return 4
     if re.search(r"formula\s*1|\bf1\b", b) and re.search(
         r"qualifying|sprint|\brace|grand\s+prix", b
     ):
         return 5
-    if re.search(r"\bucl\b|champions\s+league|uefa\s+champions", b):
+    if "stanley" in b or ("nhl" in b and re.search(r"playoff|final|conference", b)):
         return 6
     if any(
         x in b
@@ -98,6 +98,8 @@ def _daily_priority_score(e: dict[str, Any]) -> int:
         )
     ):
         return 7
+    if "wwe" in b or re.search(r"live\s+show|pay.per.view|ppv", b):
+        return 8
     tier = int(e.get("radar_tier", 50))
     if tier < 20:
         return 10 + tier
@@ -198,7 +200,11 @@ def select_now24_events(
             continue
         seen.add(key)
         out.append(e)
-    return out
+
+    from daily_tv import apply_tv_limit_for_digest
+
+    limited, _ = apply_tv_limit_for_digest(out)
+    return limited
 
 
 def collect_campaign_events(
@@ -237,7 +243,12 @@ def collect_campaign_events(
             continue
         seen.add(key)
         deduped.append(e)
-    return deduped[:NOW24_MAX_ITEMS]
+
+    from daily_tv import apply_tv_limit_for_digest
+
+    capped = deduped[:NOW24_MAX_ITEMS]
+    limited, _ = apply_tv_limit_for_digest(capped)
+    return limited
 
 
 def get_next_featured_event(

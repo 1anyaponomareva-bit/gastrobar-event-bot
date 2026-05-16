@@ -46,3 +46,6 @@ BAR_CLOSE_TIME: str = (os.getenv("BAR_CLOSE_TIME") or "06:00").strip()
 TIMEZONE: str = (os.getenv("TIMEZONE") or "Asia/Ho_Chi_Minh").strip()
 
 DAILY_POST_HOUR: int = int(os.getenv("DAILY_POST_HOUR", "11") or "11")
+
+# Сколько телевизоров в баре — лимит параллельных эфиров в daily / now24
+GASTROBAR_TV_COUNT: int = max(1, int(os.getenv("GASTROBAR_TV_COUNT", "2") or "2"))

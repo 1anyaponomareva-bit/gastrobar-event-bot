@@ -242,6 +242,10 @@ def _generate_daily_campaign_post_sync(events: list[dict]) -> str:
         return "Сегодня без крупных эфиров — загляните в Gastrobar за пивом 🍺\n\n📍Океанус, улица с траками"
     if len(events) == 1:
         return _generate_daily_event_post_sync(events[0])
+    if len(events) == 2:
+        from daily_tv import format_dual_screen_daily_post
+
+        return format_dual_screen_daily_post(events)
 
     slim = [
         {
