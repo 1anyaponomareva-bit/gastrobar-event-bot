@@ -1,0 +1,7 @@
+aiogram
+google-genai
+python-dotenv
+aiosqlite
+apscheduler
+httpx
+psutil
