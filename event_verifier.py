@@ -171,6 +171,8 @@ For UFC: if only main card start is official, you may put "Main card" in league.
 
 def _emoji_for_category(cat: str) -> str:
     c = (cat or "").upper()
+    if "F1" in c or "FORMULA" in c or "MOTORSPORT" in c or "MOTOR" in c:
+        return "🏎"
     if "AWARD" in c or "GRAMMY" in c or "OSCAR" in c or "EMMY" in c or "GOLDEN GLOBE" in c:
         return "🏆"
     if "STREAM" in c or "TWITCH" in c or "LIVESTREAM" in c or "YOUTUBE LIVE" in c:
@@ -185,8 +187,6 @@ def _emoji_for_category(cat: str) -> str:
         return "🏒"
     if "UFC" in c or "MMA" in c:
         return "🥊"
-    if "F1" in c or "FORMULA" in c:
-        return "🏎"
     if "FOOT" in c or "SOCCER" in c or "CHAMPIONS" in c or "UEFA" in c or "LIGA" in c:
         return "⚽"
     if "ESPORT" in c or "CS2" in c or "DOTA" in c or "LOL" in c or "VALORANT" in c:
@@ -198,6 +198,26 @@ def _emoji_for_category(cat: str) -> str:
     if "GAME" in c or "GAMING" in c or "GTA" in c or "PLAYSTATION" in c or "XBOX" in c or "NINTENDO" in c:
         return "🕹"
     return "🏟"
+
+
+def emoji_for_event(e: dict[str, Any]) -> str:
+    """Эмодзи по смыслу события (title/subtitle), не только category от Gemini."""
+    b = bar_event_blob(e)
+    if re.search(r"formula\s*1|\bf1\b|grand\s+prix", b):
+        return "🏎"
+    if "eurovision" in b:
+        return "🎤"
+    if re.search(r"\bufc\b|\bmma\b|boxing", b):
+        return "🥊"
+    if re.search(r"\bnba\b|basketball", b):
+        return "🏀"
+    if re.search(r"\bnhl\b|hockey|stanley\s+cup", b):
+        return "🏒"
+    if re.search(r"champions\s+league|uefa|premier\s+league|\bucl\b", b):
+        return "⚽"
+    if re.search(r"esports|dota|valorant|cs2|lol worlds", b):
+        return "🎮"
+    return _emoji_for_category(str(e.get("category", "")))
 
 
 def _normalize_hhmm(t: str) -> str | None:
@@ -608,7 +628,9 @@ async def _match_apisports(event: dict[str, Any], branch: str) -> dict[str, Any]
         "title": row.get("title") or title_cand,
         "subtitle": subtitle,
         "league": subtitle,
-        "emoji": _emoji_for_category(cat),
+        "emoji": emoji_for_event(
+            {"title": row.get("title") or title_cand, "category": cat, "subtitle": subtitle}
+        ),
         "why": "",
         "time_precision": "exact",
         "verified_via": "API-SPORTS",
@@ -718,7 +740,9 @@ def _gemini_verify_sync(event: dict[str, Any]) -> dict[str, Any] | None:
         "title": title,
         "subtitle": subtitle,
         "league": subtitle,
-        "emoji": _emoji_for_category(cat),
+        "emoji": emoji_for_event(
+            {"title": title, "category": cat, "subtitle": subtitle}
+        ),
         "why": str(data.get("source_name", "")).strip(),
         "time_precision": tp,
         "verified_via": "Gemini",
@@ -837,7 +861,9 @@ def event_from_search_candidate(
         "title": title,
         "subtitle": subtitle,
         "league": subtitle,
-        "emoji": _emoji_for_category(cat),
+        "emoji": emoji_for_event(
+            {"title": title, "category": cat, "subtitle": subtitle}
+        ),
         "why": why,
         "time_precision": time_precision,
         "verified_via": verified_via,

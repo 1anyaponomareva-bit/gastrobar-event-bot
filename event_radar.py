@@ -27,6 +27,7 @@ from gemini_client import effective_gemini_model, generate_radar_content_sync, l
 from event_verifier import (
     bar_event_blob,
     clear_fetch_cache,
+    emoji_for_event,
     event_from_search_candidate,
     gastrobar_hard_reject,
     sort_key_verified,
@@ -530,8 +531,6 @@ def _validate_concrete_event(raw: dict[str, Any]) -> dict[str, Any] | None:
         or str(raw.get("why", "")).strip()
         or str(raw.get("why_people_care", "")).strip()
     )
-    emoji = _emoji_for_category(category)
-
     cand_pre = {
         "title": title,
         "category": category,
@@ -555,9 +554,9 @@ def _validate_concrete_event(raw: dict[str, Any]) -> dict[str, Any] | None:
         "subtitle": subtitle,
         "league": subtitle,
         "why": why,
-        "emoji": emoji,
         "source_timezone": source_timezone,
     }
+    out["emoji"] = emoji_for_event(out)
     if time_approx:
         out["time_precision"] = "estimated"
     return out
@@ -803,6 +802,7 @@ def _prepare_for_afisha_selection(e: dict[str, Any]) -> dict[str, Any]:
     if _is_eurovision_event(e) and not str(e.get("subtitle", "")).strip():
         e["subtitle"] = "Music / Live show"
         e["league"] = e["subtitle"]
+    e["emoji"] = emoji_for_event(e)
     return e
 
 
