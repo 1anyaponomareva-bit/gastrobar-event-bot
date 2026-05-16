@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from google import genai
 
-from config import GEMINI_API_KEY, GEMINI_MODEL, SPORTS_API_KEY
+from config import GEMINI_API_KEY, SPORTS_API_KEY
+from gemini_client import effective_gemini_model, generate_radar_content_sync, log_gemini_error
 
 log = logging.getLogger(__name__)
 
@@ -29,15 +29,6 @@ def _safe_err(e: Exception) -> str:
     return f"{type(e).__name__}: {e}"
 
 
-def _gemini_sync_call() -> str:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    resp = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents="Ответь одним словом: ok",
-    )
-    return (resp.text or "").strip()
-
-
 async def check_gemini() -> CheckResult:
     if not GEMINI_API_KEY:
         msg = "GEMINI_API_KEY is missing"
@@ -45,16 +36,23 @@ async def check_gemini() -> CheckResult:
         return CheckResult(name="Gemini API", ok=False, details=msg)
 
     try:
-        text = await asyncio.to_thread(_gemini_sync_call)
+        text = await asyncio.to_thread(
+            generate_radar_content_sync,
+            "Ответь одним словом: ok",
+            use_search=False,
+        )
         if text.lower() != "ok":
             msg = f"неожиданный ответ: {text!r}"
             log.warning("Gemini API error: %s", msg)
             return CheckResult(name="Gemini API", ok=False, details=msg)
-        log.info("Gemini API connected")
-        return CheckResult(name="Gemini API", ok=True, details="connected")
+        log.info("Gemini API connected (model=%s)", effective_gemini_model())
+        return CheckResult(
+            name="Gemini API",
+            ok=True,
+            details=f"connected · {effective_gemini_model()}",
+        )
     except Exception as e:
-        msg = _safe_err(e)
-        log.error("Gemini API error: %s", msg)
+        msg = log_gemini_error("check_gemini", e)
         return CheckResult(name="Gemini API", ok=False, details=msg)
 
 

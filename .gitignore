@@ -1,7 +1,12 @@
 .env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 *.pyc
+*.pyo
 bot.lock
 posters/
 *.db
+*.sqlite3
+main

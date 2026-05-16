@@ -1,12 +1,13 @@
 """
 Dispatcher, который не крутит бесконечный backoff при TelegramConflictError:
-другой клиент уже держит getUpdates — выходим сразу.
+другой клиент уже держит getUpdates — выходим сразу (fail-fast для Railway).
 """
 
 from __future__ import annotations
 
+import sys
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from aiogram import loggers
 from aiogram.dispatcher.dispatcher import DEFAULT_BACKOFF_CONFIG, Dispatcher
@@ -17,6 +18,20 @@ from aiogram.utils.backoff import Backoff, BackoffConfig
 if TYPE_CHECKING:
     from aiogram.client.bot import Bot
     from aiogram.types import Update
+
+
+def _exit_on_conflict(context: str) -> None:
+    loggers.dispatcher.error(
+        "%s: TelegramConflictError — другой клиент уже вызывает getUpdates "
+        "(второй Railway deployment, локальный polling или webhook). "
+        "Процесс завершается без retry.",
+        context,
+    )
+    print(
+        "TelegramConflictError: only one getUpdates client allowed. Exiting.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
 
 class FatalConflictDispatcher(Dispatcher):
@@ -40,10 +55,7 @@ class FatalConflictDispatcher(Dispatcher):
             try:
                 updates = await bot(get_updates, **kwargs)
             except TelegramConflictError:
-                loggers.dispatcher.error(
-                    "TelegramConflictError: другой клиент вызывает getUpdates. Останавливаем polling."
-                )
-                raise
+                _exit_on_conflict("listen_updates")
             except Exception as e:  # noqa: BLE001
                 failed = True
                 loggers.dispatcher.error("Failed to fetch updates - %s: %s", type(e).__name__, e)
@@ -68,3 +80,9 @@ class FatalConflictDispatcher(Dispatcher):
             for update in updates:
                 yield update
                 get_updates.offset = update.update_id + 1
+
+    async def start_polling(self, *bots: Bot, **kwargs: Any) -> None:
+        try:
+            await super().start_polling(*bots, **kwargs)
+        except TelegramConflictError:
+            _exit_on_conflict("start_polling")
