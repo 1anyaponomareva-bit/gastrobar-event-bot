@@ -210,3 +210,46 @@ def _generate_daily_event_post_sync(event: dict) -> str:
 
 async def generate_daily_event_post(event: dict) -> str:
     return await asyncio.to_thread(_generate_daily_event_post_sync, event)
+
+
+def _generate_daily_campaign_post_sync(events: list[dict]) -> str:
+    if not events:
+        return "Сегодня без крупных эфиров — загляните в Gastrobar за пивом 🍺\n\n📍Океанус, улица с траками"
+    if len(events) == 1:
+        return _generate_daily_event_post_sync(events[0])
+
+    events_json = json.dumps(events, ensure_ascii=False, indent=2)
+    prompt = f"""{STYLE_SYSTEM}
+
+Напиши ОДИН готовый пост для Telegram Gastrobar про ближайшие крупные эфиры (пост дня).
+Это НЕ недельная афиша-список, а живой барный анонс на сегодня/ночь.
+
+Тон: живой, барный, короткий, атмосферный, не официальный пресс-релиз.
+Длина: до 700 символов.
+
+Структура (примерно):
+- цепляющий заход (1 строка, можно с эмодзи);
+- блоки по каждому событию из JSON: эмодзи, название, время (display_time);
+- 1–2 строки про большой экран в Gastrobar;
+- 2–3 короткие строки про бар (пиво, настойки, атмосфера);
+- финал: 📍Океанус, улица с траками
+
+Не используй канцелярит. Без хэштегов. Не выдумывай события вне JSON.
+
+События (JSON):
+{events_json}
+"""
+    client = _client()
+    response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    text = (response.text or "").strip()
+    if not text:
+        raise RuntimeError("Пустой ответ Gemini (daily campaign)")
+    if len(text) > 700:
+        text = text[:697].rstrip() + "..."
+    if "Океанус" not in text:
+        text = text.rstrip() + "\n\n📍Океанус, улица с траками"
+    return text
+
+
+async def generate_daily_campaign_post(events: list[dict]) -> str:
+    return await asyncio.to_thread(_generate_daily_campaign_post_sync, events)

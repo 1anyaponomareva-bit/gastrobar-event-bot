@@ -928,10 +928,12 @@ async def _fallback_events_from_sports_api() -> tuple[list[dict[str, Any]], int]
     return final, raw_total
 
 
-async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, str | None]:
+async def _fetch_radar_pipeline() -> tuple[
+    list[dict[str, Any]], int, list[dict[str, Any]], str | None
+]:
     """
-    (события после verify, суммарно сырых JSON из Gemini за все шард-поиски,
-    суммарно кандидатов после локальной валидации, финальных, причина пустого fetch).
+    Пул после verify + bar hours + tier (до финального отбора week/now24).
+    (pool, raw_total, prelim_raw, fetch_note)
     """
     clear_fetch_cache()
     prelim, raw_total, fetch_note = await asyncio.to_thread(fetch_radar_multi_search_sync)
@@ -939,7 +941,9 @@ async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, s
     if fetch_note == "gemini_quota":
         fallback, fb_raw = await _fallback_events_from_sports_api()
         if fallback:
-            return fallback, fb_raw, len(fallback), len(fallback), "sports_fallback"
+            for e in fallback:
+                _prepare_for_afisha_selection(e)
+            return fallback, fb_raw, [], "sports_fallback"
 
     results = await asyncio.gather(*[verify_event(e) for e in prelim])
     verified_all: list[dict[str, Any]] = []
@@ -965,8 +969,7 @@ async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, s
 
     if not verified_all and prelim:
         log.warning(
-            "Event Radar: verify dropped all %s Gemini Search candidates; "
-            "applying pass-through (medium confidence)",
+            "Event Radar: verify dropped all %s candidates; pass-through medium",
             len(prelim),
         )
         for cand in prelim:
@@ -979,7 +982,6 @@ async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, s
                 verified_all.append(pt)
 
     verified_all = filter_events_for_bar_hours(verified_all)
-
     for v in verified_all:
         _prepare_for_afisha_selection(v)
 
@@ -990,22 +992,29 @@ async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, s
         pool = [v for v in verified_all if not gastrobar_hard_reject(v)]
         if pool:
             log.warning(
-                "Event Radar: no P1/P2 after verify; using %s verified rows "
-                "(bar hard filter only, treated as P2)",
+                "Event Radar: no P1/P2; using %s rows (bar filter only)",
                 len(pool),
             )
             for v in pool:
                 if v.get("radar_priority", 0) < 1:
                     v["radar_priority"] = 2
 
+    log.info(
+        "Event Radar pipeline: raw=%s pre=%s kept=%s dropped=%s pool=%s",
+        raw_total,
+        len(prelim),
+        len(verified_all),
+        verify_dropped,
+        len(pool),
+    )
+    return pool, raw_total, prelim, fetch_note
+
+
+def _finalize_week_selection(pool: list[dict[str, Any]], prelim: list[dict[str, Any]]) -> list[dict[str, Any]]:
     final = _select_final_radar_events(pool)
     final = [e for e in final if not gastrobar_hard_reject(e)]
-
     if prelim and not final:
-        log.warning(
-            "Event Radar: prelim=%s but final empty after selection — last-chance pass-through",
-            len(prelim),
-        )
+        log.warning("Event Radar week: last-chance pass-through")
         rescue = [
             event_from_search_candidate(
                 c,
@@ -1017,23 +1026,39 @@ async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, s
         final = filter_events_for_bar_hours([e for e in rescue if e])[:RADAR_MAX_ITEMS]
         for e in final:
             _prepare_for_afisha_selection(e)
+    return final
 
-    log.info(
-        "Event Radar verified: raw_total=%s pre_verify=%s kept=%s dropped=%s final=%s",
-        raw_total,
-        len(prelim),
-        len(verified_all),
-        verify_dropped,
-        len(final),
-    )
+
+async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, str | None]:
+    """Афиша недели: до 6 главных событий."""
+    pool, raw_total, prelim, fetch_note = await _fetch_radar_pipeline()
+    if fetch_note == "sports_fallback":
+        final = pool[:RADAR_MAX_ITEMS]
+    else:
+        final = _finalize_week_selection(pool, prelim)
+    log.info("Event Radar week final=%s", len(final))
     return final, raw_total, len(prelim), len(final), fetch_note
 
 
-def format_radar_afisha(events: list[dict[str, Any]]) -> str:
-    """Одна аккуратная афиша для Telegram (без второго «рекламного» блока)."""
+async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, str | None]:
+    """События ближайших 24 часов (без добивания слабым хвостом)."""
+    from daily_event import select_now24_events
+
+    pool, raw_total, prelim, fetch_note = await _fetch_radar_pipeline()
+    final = select_now24_events(pool)
+    log.info("Event Radar now24 final=%s", len(final))
+    return final, raw_total, len(prelim), len(final), fetch_note
+
+
+def format_radar_afisha(
+    events: list[dict[str, Any]],
+    *,
+    section_title: str = "🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
+) -> str:
+    """Список событий для Telegram (без верхнего заголовка режима)."""
     if not events:
         return "Пока нет событий в подборке."
-    lines = ["🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR", ""]
+    lines = [section_title, ""]
     for e in events:
         em = str(e.get("emoji", "🏟")).strip()
         wd = str(e.get("weekday", "")).strip()
@@ -1055,6 +1080,30 @@ def format_radar_afisha(events: list[dict[str, Any]]) -> str:
         lines.append("")
     lines.append("📍Океанус, улица с траками")
     return "\n".join(lines).strip()
+
+
+def format_radar_week_message(events: list[dict[str, Any]]) -> str:
+    body = format_radar_afisha(
+        events,
+        section_title="🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
+    )
+    return f"🔭 Event Radar · Week\n\n{body}"
+
+
+def format_radar_now24_message(events: list[dict[str, Any]]) -> str:
+    body = format_radar_afisha(
+        events,
+        section_title="⚡ СОБЫТИЯ В БЛИЖАЙШИЕ 24 ЧАСА",
+    )
+    return f"⚡ Event Radar · Next 24h\n\n{body}"
+
+
+def radar_fetch_header(fetch_note: str | None) -> str:
+    if fetch_note == "search_fallback":
+        return "🔭 Event Radar · Gemini (fallback)\nGoogle Search недоступен."
+    if fetch_note == "sports_fallback":
+        return "🔭 Event Radar · API-SPORTS (резерв)\nЛимит Gemini исчерпан."
+    return ""
 
 
 def radar_events_to_db_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:

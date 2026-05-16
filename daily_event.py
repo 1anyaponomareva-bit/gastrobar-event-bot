@@ -156,6 +156,90 @@ async def fetch_week_events_for_daily() -> list[dict[str, Any]]:
     return [_prepare_for_afisha_selection(dict(e)) for e in filtered]
 
 
+NOW24_MAX_ITEMS = 4
+
+
+def select_now24_events(
+    events: list[dict[str, Any]] | None = None,
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Сильные события в ближайшие 24 ч; без добивания слабым хвостом."""
+    now = now or _vn_now()
+    pool = events or []
+    candidates: list[dict[str, Any]] = []
+    for e in pool:
+        if int(e.get("radar_tier", 99)) >= 99:
+            continue
+        if not is_in_daily_window(e, now):
+            continue
+        candidates.append(enrich_daily_campaign_meta(e, now))
+
+    if not candidates:
+        return []
+
+    candidates.sort(
+        key=lambda x: (
+            _daily_priority_score(x),
+            event_start_datetime_vn(x) or datetime.max.replace(tzinfo=TZ),
+        )
+    )
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for e in candidates:
+        if len(out) >= NOW24_MAX_ITEMS:
+            break
+        key = (
+            str(e.get("date", "")),
+            str(e.get("title", "")).lower()[:80],
+            str(e.get("display_time") or e.get("time", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(e)
+    return out
+
+
+def collect_campaign_events(
+    events: list[dict[str, Any]] | None = None,
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """События для ежедневного поста сегодня (окно 24 ч + campaign_post_date)."""
+    now = now or _vn_now()
+    pool = events or []
+    out: list[dict[str, Any]] = []
+    for e in pool:
+        if not is_in_daily_window(e, now):
+            continue
+        cpd = campaign_post_date(e)
+        if cpd and cpd != now.date():
+            continue
+        if int(e.get("radar_tier", 99)) >= 99:
+            continue
+        out.append(enrich_daily_campaign_meta(e, now))
+    out.sort(
+        key=lambda x: (
+            _daily_priority_score(x),
+            event_start_datetime_vn(x) or datetime.max.replace(tzinfo=TZ),
+        )
+    )
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[dict[str, Any]] = []
+    for e in out:
+        key = (
+            str(e.get("date", "")),
+            str(e.get("title", "")).lower()[:80],
+            str(e.get("display_time") or e.get("time", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(e)
+    return deduped[:NOW24_MAX_ITEMS]
+
+
 def get_next_featured_event(
     events: list[dict[str, Any]] | None = None,
     *,

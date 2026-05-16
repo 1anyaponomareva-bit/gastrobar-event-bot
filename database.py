@@ -54,6 +54,29 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS radar_snapshots (
+                mode TEXT PRIMARY KEY,
+                events_json TEXT NOT NULL,
+                meta_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduled_event_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                campaign_date TEXT NOT NULL,
+                events_json TEXT NOT NULL,
+                draft_id INTEGER,
+                status TEXT NOT NULL,
+                sent_at TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         await db.commit()
 
 
@@ -164,6 +187,68 @@ async def upsert_draft_asset(
             (draft_id, image_path, event_json, poster_source),
         )
         await db.commit()
+
+
+async def save_radar_snapshot(
+    mode: str,
+    events: list[dict[str, Any]],
+    meta: dict[str, Any] | None = None,
+) -> None:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO radar_snapshots (mode, events_json, meta_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(mode) DO UPDATE SET
+                events_json=excluded.events_json,
+                meta_json=excluded.meta_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                mode,
+                json.dumps(events, ensure_ascii=False),
+                json.dumps(meta or {}, ensure_ascii=False),
+                _utc_now(),
+            ),
+        )
+        await db.commit()
+
+
+async def get_radar_snapshot(mode: str) -> list[dict[str, Any]] | None:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT events_json FROM radar_snapshots WHERE mode = ?",
+            (mode,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return None
+    try:
+        data = json.loads(row["events_json"])
+        return data if isinstance(data, list) else None
+    except json.JSONDecodeError:
+        return None
+
+
+async def record_scheduled_post(
+    *,
+    campaign_date: str,
+    events_json: str,
+    draft_id: int | None,
+    status: str,
+) -> int:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """
+            INSERT INTO scheduled_event_posts
+                (campaign_date, events_json, draft_id, status, sent_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (campaign_date, events_json, draft_id, status, _utc_now(), _utc_now()),
+        )
+        await db.commit()
+        return int(cur.lastrowid)
 
 
 async def get_draft_asset(draft_id: int) -> dict[str, Any] | None:

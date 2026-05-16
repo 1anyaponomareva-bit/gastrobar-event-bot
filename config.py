@@ -44,3 +44,5 @@ def is_railway_run() -> bool:
 BAR_OPEN_TIME: str = (os.getenv("BAR_OPEN_TIME") or "08:00").strip()
 BAR_CLOSE_TIME: str = (os.getenv("BAR_CLOSE_TIME") or "06:00").strip()
 TIMEZONE: str = (os.getenv("TIMEZONE") or "Asia/Ho_Chi_Minh").strip()
+
+DAILY_POST_HOUR: int = int(os.getenv("DAILY_POST_HOUR", "11") or "11")

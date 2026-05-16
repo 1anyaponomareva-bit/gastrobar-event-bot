@@ -1,33 +1,71 @@
-"""Inline-клавиатуры."""
+"""Inline-клавиатуры Event Radar и постов."""
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-def week_actions_kb() -> InlineKeyboardMarkup:
+def radar_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Сгенерировать пост",
-                    callback_data="week:gen_one",
+                    text="📅 Афиша на неделю",
+                    callback_data="radar:week",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="Сгенерировать 3 поста",
-                    callback_data="week:gen_three",
+                    text="⚡ События сейчас / 24 часа",
+                    callback_data="radar:now24",
+                ),
+            ],
+        ]
+    )
+
+
+def radar_week_result_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📋 Сгенерировать пост",
+                    callback_data="radar:week:gen",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="Обновить события",
-                    callback_data="week:refresh",
+                    text="🔄 Обновить",
+                    callback_data="radar:week",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="Отмена",
-                    callback_data="week:cancel",
+                    text="❌ Закрыть",
+                    callback_data="radar:close",
+                ),
+            ],
+        ]
+    )
+
+
+def radar_now24_result_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📋 Сгенерировать пост на сегодня",
+                    callback_data="radar:now24:gen",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Обновить",
+                    callback_data="radar:now24",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Закрыть",
+                    callback_data="radar:close",
                 ),
             ],
         ]
@@ -53,23 +91,6 @@ def post_result_kb(draft_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="Отмена",
                     callback_data=f"draft:cancel:{draft_id}",
-                ),
-            ],
-        ]
-    )
-
-
-def daily_alert_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔥 Сделать пост дня",
-                    callback_data="daily:post",
-                ),
-                InlineKeyboardButton(
-                    text="Пропустить",
-                    callback_data="daily:skip",
                 ),
             ],
         ]

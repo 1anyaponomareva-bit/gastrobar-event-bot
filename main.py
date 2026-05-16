@@ -20,19 +20,13 @@ from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
     FSInputFile,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     MenuButtonCommands,
     Message,
 )
 
-from ai_generator import generate_daily_event_post, generate_weekly_poster
-from daily_event import (
-    enrich_daily_campaign_meta,
-    fetch_week_events_for_daily,
-    get_next_featured_event,
-)
-from daily_poster import regenerate_poster_only, resolve_event_poster
+from ai_generator import generate_daily_campaign_post, generate_weekly_poster
+from daily_event_posts import build_daily_content_package, deliver_daily_content_to_admin
+from image_finder import regenerate_event_image
 from api_checks import check_gemini, check_sports_api
 from bot_instance_lock import release_bot_lock, try_acquire_bot_lock
 from bot_typing import show_typing
@@ -52,19 +46,26 @@ from database import (
     get_draft_asset,
     init_db,
     insert_draft,
+    save_radar_snapshot,
     update_draft_status,
     update_draft_text,
     upsert_draft_asset,
 )
-from keyboards import daily_post_kb
-from scheduler import (
-    get_pending_daily,
-    set_pending_daily,
-    setup_jobs,
-    shutdown_scheduler,
-    start_scheduler,
+from keyboards import (
+    daily_post_kb,
+    post_result_kb,
+    radar_menu_kb,
+    radar_now24_result_kb,
+    radar_week_result_kb,
 )
-from event_radar import format_radar_afisha, get_event_radar_week
+from scheduler import setup_jobs, shutdown_scheduler, start_scheduler
+from event_radar import (
+    format_radar_now24_message,
+    format_radar_week_message,
+    get_event_radar_now24,
+    get_event_radar_week,
+    radar_fetch_header,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,8 +78,7 @@ router = Router()
 # Event Radar (Gemini + Google Search) может занять дольше, чем спортивный API.
 WEEK_FETCH_TIMEOUT_SEC = 240.0
 last_draft_state: dict[int, dict[str, Any]] = {}
-# Последняя сессия /events или /week: подборка до генерации афиши
-week_editor_state: dict[int, dict[str, Any]] = {}
+radar_sessions: dict[int, dict[str, Any]] = {}
 daily_post_state: dict[int, dict[str, Any]] = {}
 
 
@@ -98,30 +98,6 @@ def _ru_selected_main_line(n: int) -> str:
     if 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20):
         return f"Выбрано {n} главных события недели."
     return f"Выбрано {n} главных событий недели."
-
-
-def week_generate_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔥 Сгенерировать афишу", callback_data="week:generate")],
-            [
-                InlineKeyboardButton(
-                    text="🔥 Сгенерировать пост дня",
-                    callback_data="daily:generate",
-                )
-            ],
-        ]
-    )
-
-
-def draft_actions_kb(draft_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"draft:pub:{draft_id}")],
-            [InlineKeyboardButton(text="🔄 Переделать", callback_data=f"draft:redo:{draft_id}")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"draft:cancel:{draft_id}")],
-        ]
-    )
 
 
 def _fail_conflict(context: str) -> None:
@@ -203,7 +179,7 @@ async def set_bot_commands(bot: Bot) -> None:
         BotCommand(command="start", description="Запустить бота"),
         BotCommand(
             command="events",
-            description="Собрать события недели",
+            description="Event Radar — меню",
         ),
         BotCommand(command="check", description="Проверить API подключения"),
         BotCommand(command="gemini_test", description="Тест Gemini и Google Search"),
@@ -247,134 +223,51 @@ async def cmd_start(message: Message) -> None:
         f"Бот живой. Твой ID: {user_id}\n\n"
         "Команды меню обновлены. Открой кнопку меню слева от поля ввода — там "
         "/start, /events, /check и /gemini_test.\n\n"
-        "Собрать афишу недели (Event Radar): пункт «Собрать события недели» или команда /events.\n"
+        "Event Radar: /events — меню (афиша недели или события 24 ч).\n"
         "Команду /week можно ввести вручную — она делает то же, что /events (в меню не показывается).\n\n"
         "Если списка нет: полностью закрой чат с ботом и открой снова, либо обнови Telegram."
     )
 
 
-async def run_event_radar_flow(message: Message) -> None:
-    try:
-        logger.info("Event Radar command: %s", message.text)
-        bot = message.bot
-        chat_id = message.chat.id
-        async with show_typing(bot, chat_id):
-            await message.answer(
-                "Ищу события недели для бара (Gemini Search, разные категории)…"
-            )
-            try:
-                events, raw_total, pre_count, selected, fetch_note = await asyncio.wait_for(
-                    get_event_radar_week(),
-                    timeout=WEEK_FETCH_TIMEOUT_SEC,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Event Radar: таймаут (%s c)",
-                    WEEK_FETCH_TIMEOUT_SEC,
-                )
-                await message.answer(
-                    "Таймаут поиска. Проверьте интернет и GEMINI_API_KEY, повторите /events."
-                )
-                return
-            except Exception:
-                logger.exception("Event Radar failed")
-                await message.answer(
-                    "Не удалось получить подборку Event Radar. "
-                    "Проверьте GEMINI_API_KEY и доступность Gemini."
-                )
-                return
-            user_id = message.from_user.id if message.from_user else 0
-
-            if selected == 0:
-                if fetch_note == "gemini_quota":
-                    await message.answer(
-                        "Сработал дневной лимит бесплатного Gemini (free tier: мало запросов "
-                        "на модель в сутки). Подождите до завтра, подключите биллинг в Google AI Studio "
-                        "или используйте другой API-ключ/проект.\n\n"
-                        "Справка по лимитам: https://ai.google.dev/gemini-api/docs/rate-limits"
-                    )
-                elif fetch_note == "gemini_error":
-                    await message.answer(
-                        "Gemini ответил с ошибкой при поиске недели (не 429). "
-                        "Выполните /gemini_test — детали в Railway logs. "
-                        "Модель: проверьте GEMINI_MODEL (сейчас по умолчанию gemini-2.5-flash)."
-                    )
-                elif raw_total > 0 and pre_count > 0:
-                    await message.answer(
-                        "Gemini Search нашёл события, но ни одно не подошло под правила бара "
-                        "(сериальные финалы, абстрактные названия без матча и т.п.). "
-                        "Попробуйте /events ещё раз — состав недели мог обновиться."
-                    )
-                elif raw_total > 0 and pre_count == 0:
-                    await message.answer(
-                        "Поиск вернул строки в JSON, но ни одна не прошла первичную проверку "
-                        "(формат даты/времени, таймзона, фильтры бара). "
-                        "Попробуйте /events ещё раз через минуту."
-                    )
-                else:
-                    logger.warning(
-                        "Event Radar empty: raw_total=%s pre_count=%s fetch_note=%s",
-                        raw_total,
-                        pre_count,
-                        fetch_note,
-                    )
-                    await message.answer(
-                        "Подборка пуста: поиск не вернул ни одного события "
-                        "(пустой список от модели, сеть или лимиты API).\n\n"
-                        "Сначала выполните /check — там та же модель Gemini, что и в /events. "
-                        "На бесплатном тарифе лимит маленький (порядка 20 запросов в сутки на модель); "
-                        "при исчерпании подождите до завтра или подключите биллинг.\n\n"
-                        "Лимиты: https://ai.google.dev/gemini-api/docs/rate-limits"
-                    )
-                week_editor_state.pop(user_id, None)
-                return
-
-            week_editor_state[user_id] = {
-                "events": events,
-                "raw_total": raw_total,
-                "pre_count": pre_count,
-                "selected": selected,
-            }
-            header = "🔭 Event Radar · Gemini Search"
-            if fetch_note == "search_fallback":
-                header = (
-                    "🔭 Event Radar · Gemini (fallback)\n"
-                    "Google Search недоступен, использую fallback."
-                )
-            elif fetch_note == "sports_fallback":
-                header = (
-                    "🔭 Event Radar · API-SPORTS (резерв)\n"
-                    "Лимит Gemini исчерпан — показана подборка из спортивного API."
-                )
-            text = (
-                f"{header}\n"
-                f"{_ru_found_events_line(raw_total)}\n"
-                f"{_ru_selected_main_line(selected)}\n\n"
-                f"{format_radar_afisha(events)}"
-            )
-            await message.answer(text, reply_markup=week_generate_kb())
-    except Exception:
-        logger.exception("Unhandled error in Event Radar handler")
-        await message.answer("Ошибка при сборе событий. Попробуйте /events ещё раз.")
+def _events_menu_text() -> str:
+    return (
+        "Что собрать?\n\n"
+        "📅 Афиша на неделю\n"
+        "— главные события ближайших 7 дней\n\n"
+        "⚡ События сейчас / 24 часа\n"
+        "— эфиры в ближайшие сутки для поста сегодня"
+    )
 
 
-@router.message(Command("events", "week"))
-async def cmd_events_or_week(message: Message) -> None:
-    await run_event_radar_flow(message)
-
-
-async def _build_and_send_daily_post(
-    target: Message | CallbackQuery,
+async def _answer_radar_empty(
+    message: Message,
     *,
-    featured_event: dict[str, Any] | None = None,
-    redo_text: bool = False,
-    redo_image: bool = False,
-    draft_id: int | None = None,
+    raw_total: int,
+    pre_count: int,
+    fetch_note: str | None,
 ) -> None:
-    """Собрать пост дня: текст + постер, отправить превью."""
-    import json
-    from pathlib import Path
+    if fetch_note == "gemini_quota":
+        await message.answer(
+            "Лимит Gemini исчерпан. Подождите до завтра или подключите биллинг.\n"
+            "https://ai.google.dev/gemini-api/docs/rate-limits"
+        )
+    elif fetch_note == "gemini_error":
+        await message.answer("Ошибка Gemini. Выполните /gemini_test и проверьте логи.")
+    elif raw_total > 0:
+        await message.answer(
+            "Поиск нашёл кандидатов, но ничего не прошло фильтры бара/verify. "
+            "Попробуйте «Обновить» через минуту."
+        )
+    else:
+        await message.answer(
+            "Подборка пуста. Проверьте GEMINI_API_KEY (/check) и повторите."
+        )
 
+
+async def _run_radar_mode(
+    target: Message | CallbackQuery,
+    mode: str,
+) -> None:
     if isinstance(target, CallbackQuery):
         message = target.message
         bot = target.bot
@@ -388,164 +281,217 @@ async def _build_and_send_daily_post(
         return
 
     chat_id = message.chat.id
-    state = daily_post_state.get(user_id, {})
+    fetch_fn = get_event_radar_week if mode == "week" else get_event_radar_now24
+    label = "неделю" if mode == "week" else "ближайшие 24 часа"
 
-    if redo_text or redo_image:
-        if not state and draft_id:
-            asset = await get_draft_asset(draft_id)
-            draft_row = await get_draft(draft_id)
-            if asset and draft_row:
-                state = {
-                    "draft_id": draft_id,
-                    "event": json.loads(asset["event_json"]),
-                    "image_path": asset["image_path"],
-                    "poster_source": asset.get("poster_source", ""),
-                }
-        if not state:
-            await message.answer(
-                "Сессия поста дня устарела. Нажми «Сгенерировать пост дня» снова."
-            )
-            return
-        ev = state["event"]
-        did = int(state["draft_id"])
-        image_path = state.get("image_path")
-        poster_source = state.get("poster_source", "")
-    else:
-        if featured_event:
-            ev = enrich_daily_campaign_meta(featured_event)
-        else:
-            async with show_typing(bot, chat_id):
-                await message.answer(
-                    "Ищу главное событие на ближайшие 24 часа (пост дня)…"
-                )
-                pool = await asyncio.wait_for(
-                    fetch_week_events_for_daily(),
-                    timeout=WEEK_FETCH_TIMEOUT_SEC,
-                )
-                ev = get_next_featured_event(pool)
-        if not ev:
-            await message.answer(
-                "Нет подходящего события для поста дня в ближайшие 24 часа "
-                "(рабочие часы бара, приоритет, окно публикации). Сначала /events."
-            )
-            return
-        did = None
-        image_path = None
-        poster_source = ""
-
-    image_bytes: bytes | None = None
     async with show_typing(bot, chat_id):
-        if redo_image:
-            draft_row = await get_draft(did)
-            caption = (draft_row or {}).get("text", "") if draft_row else ""
-            image_bytes, poster_source, image_path = await regenerate_poster_only(
-                ev, draft_id=did, force_ai=True
+        await message.answer(f"Ищу события: {label} (Gemini Search + verify)…")
+        try:
+            events, raw_total, pre_count, selected, fetch_note = await asyncio.wait_for(
+                fetch_fn(),
+                timeout=WEEK_FETCH_TIMEOUT_SEC,
             )
-        elif redo_text:
-            caption = await generate_daily_event_post(ev)
-        else:
-            caption = await generate_daily_event_post(ev)
-            if did is None:
-                did = await insert_draft("daily_post", caption, "draft")
-            else:
-                await update_draft_text(did, caption)
-            image_bytes, poster_source, image_path = await resolve_event_poster(
-                ev, draft_id=did
-            )
+        except asyncio.TimeoutError:
+            await message.answer("Таймаут поиска. Повторите позже.")
+            return
+        except Exception:
+            logger.exception("radar:%s failed", mode)
+            await message.answer("Не удалось собрать Event Radar.")
+            return
 
-    if not caption:
-        await message.answer("Не удалось сгенерировать текст поста дня.")
+    if selected == 0:
+        radar_sessions.pop(user_id, None)
+        await _answer_radar_empty(message, raw_total=raw_total, pre_count=pre_count, fetch_note=fetch_note)
         return
 
-    if did is None:
-        did = await insert_draft("daily_post", caption, "draft")
-    elif redo_text or redo_image:
-        await update_draft_status(did, "draft")
-        if redo_text:
-            await update_draft_text(did, caption)
+    radar_sessions[user_id] = {
+        "mode": mode,
+        "events": events,
+        "raw_total": raw_total,
+        "pre_count": pre_count,
+        "selected": selected,
+        "fetch_note": fetch_note,
+    }
+    await save_radar_snapshot(mode, events, {"raw_total": raw_total, "selected": selected})
 
-    if image_path or image_bytes:
+    extra = radar_fetch_header(fetch_note)
+    stats = f"{_ru_found_events_line(raw_total)}\n{_ru_selected_main_line(selected)}"
+    body = (
+        format_radar_week_message(events)
+        if mode == "week"
+        else format_radar_now24_message(events)
+    )
+    text = f"{extra}\n{stats}\n\n{body}" if extra else f"{stats}\n\n{body}"
+    kb = radar_week_result_kb() if mode == "week" else radar_now24_result_kb()
+    await message.answer(text, reply_markup=kb)
+
+
+@router.message(Command("events", "week"))
+async def cmd_events_or_week(message: Message) -> None:
+    await message.answer(_events_menu_text(), reply_markup=radar_menu_kb())
+
+
+@router.callback_query(F.data == "radar:week")
+async def radar_week(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await _run_radar_mode(callback, "week")
+
+
+@router.callback_query(F.data == "radar:now24")
+async def radar_now24(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await _run_radar_mode(callback, "now24")
+
+
+@router.callback_query(F.data == "radar:close")
+async def radar_close(callback: CallbackQuery) -> None:
+    await callback.answer()
+    user_id = callback.from_user.id
+    radar_sessions.pop(user_id, None)
+    if callback.message:
+        await callback.message.answer("Event Radar закрыт.")
+
+
+@router.callback_query(F.data == "radar:week:gen")
+async def radar_week_generate(callback: CallbackQuery) -> None:
+    await callback.answer()
+    sess = radar_sessions.get(callback.from_user.id)
+    if not sess or sess.get("mode") != "week":
+        await callback.message.answer("Сессия устарела. Нажмите /events → Афиша на неделю.")
+        return
+    events = sess["events"]
+    async with show_typing(callback.bot, callback.message.chat.id):
+        await callback.message.answer("Пишу пост по афише недели…")
+        post_text = await generate_weekly_poster(events)
+    draft_id = await insert_draft("week_post", post_text, "draft")
+    last_draft_state[callback.from_user.id] = {"draft_id": draft_id, "events": events}
+    await callback.message.answer(post_text, reply_markup=post_result_kb(draft_id))
+
+
+@router.callback_query(F.data == "radar:now24:gen")
+async def radar_now24_generate(callback: CallbackQuery) -> None:
+    await callback.answer()
+    sess = radar_sessions.get(callback.from_user.id)
+    if not sess or sess.get("mode") != "now24":
+        await callback.message.answer("Сессия устарела. Нажмите /events → 24 часа.")
+        return
+    async with show_typing(callback.bot, callback.message.chat.id):
+        await callback.message.answer("Готовлю пост на сегодня (verify + текст + картинка)…")
+        pkg = await build_daily_content_package(sess["events"])
+    if not pkg:
+        await callback.message.answer("Нет событий для поста на сегодня.")
+        return
+    daily_post_state[callback.from_user.id] = {
+        "draft_id": pkg.draft_id,
+        "event": pkg.events[0] if pkg.events else {},
+        "events": pkg.events,
+        "image_path": pkg.image_path,
+        "poster_source": pkg.image_source,
+    }
+    await deliver_daily_content_to_admin(
+        callback.bot, pkg, chat_id=callback.message.chat.id
+    )
+
+
+async def _redo_daily_post(
+    callback: CallbackQuery,
+    *,
+    redo_text: bool,
+    redo_image: bool,
+    draft_id: int,
+) -> None:
+    import json
+
+    state = daily_post_state.get(callback.from_user.id, {})
+    asset = await get_draft_asset(draft_id)
+    draft_row = await get_draft(draft_id)
+    if asset:
+        try:
+            events = json.loads(asset["event_json"])
+        except json.JSONDecodeError:
+            events = []
+        if not isinstance(events, list):
+            events = [events] if events else []
+    else:
+        events = state.get("events") or []
+    if not events:
+        await callback.message.answer("Нет данных события. Сгенерируйте пост заново.")
+        return
+
+    primary = events[0]
+    if redo_text:
+        text = await generate_daily_campaign_post(events)
+        await update_draft_text(draft_id, text)
+    else:
+        text = (draft_row or {}).get("text", "")
+
+    image_bytes = None
+    image_path = state.get("image_path")
+    poster_source = state.get("poster_source", "")
+    if redo_image:
+        image_bytes, poster_source, image_path = await regenerate_event_image(
+            primary, draft_id=draft_id
+        )
         await upsert_draft_asset(
-            did,
+            draft_id,
             image_path=image_path or "",
-            event_json=json.dumps(ev, ensure_ascii=False),
+            event_json=asset["event_json"] if asset else json.dumps(events, ensure_ascii=False),
             poster_source=poster_source,
         )
 
-    daily_post_state[user_id] = {
-        "draft_id": did,
-        "event": ev,
+    daily_post_state[callback.from_user.id] = {
+        "draft_id": draft_id,
+        "events": events,
+        "event": primary,
         "image_path": image_path,
         "poster_source": poster_source,
     }
-
-    preview = (
-        f"📣 Пост дня · {ev.get('daily_timing_phrase', '')}\n"
-        f"{ev.get('title', '')}\n"
-        f"Постер: {poster_source or 'нет'}"
-    )
+    chat_id = callback.message.chat.id
+    kb = daily_post_kb(draft_id)
     if image_path and Path(image_path).is_file():
-        await bot.send_photo(
-            chat_id,
-            photo=FSInputFile(image_path),
-            caption=caption,
-            reply_markup=daily_post_kb(did),
+        await callback.bot.send_photo(
+            chat_id, photo=FSInputFile(image_path), caption=text, reply_markup=kb
         )
     elif image_bytes:
-        await bot.send_photo(
+        await callback.bot.send_photo(
             chat_id,
-            photo=BufferedInputFile(image_bytes, filename="daily_poster.png"),
-            caption=caption,
-            reply_markup=daily_post_kb(did),
+            photo=BufferedInputFile(image_bytes, filename="daily_post.png"),
+            caption=text,
+            reply_markup=kb,
         )
     else:
-        await message.answer(caption, reply_markup=daily_post_kb(did))
-    await message.answer(preview)
+        await callback.message.answer(text, reply_markup=kb)
 
 
 @router.message(Command("daily"))
 async def cmd_daily(message: Message) -> None:
     try:
-        pending = get_pending_daily()
-        featured = pending[0] if pending else None
-        await _build_and_send_daily_post(message, featured_event=featured)
+        async with show_typing(message.bot, message.chat.id):
+            await message.answer("Готовлю пост дня (verify + текст + картинка)…")
+            pkg = await asyncio.wait_for(
+                build_daily_content_package(),
+                timeout=WEEK_FETCH_TIMEOUT_SEC,
+            )
+        if not pkg:
+            await message.answer(
+                "Нет крупных событий для поста сегодня. Попробуйте /events → 24 часа."
+            )
+            return
+        daily_post_state[message.from_user.id] = {
+            "draft_id": pkg.draft_id,
+            "events": pkg.events,
+            "event": pkg.events[0],
+            "image_path": pkg.image_path,
+            "poster_source": pkg.image_source,
+        }
+        await deliver_daily_content_to_admin(
+            message.bot, pkg, chat_id=message.chat.id
+        )
     except asyncio.TimeoutError:
         await message.answer("Таймаут. Повторите позже.")
     except Exception:
         logger.exception("cmd /daily failed")
         await message.answer("Не удалось сгенерировать пост дня.")
-
-
-@router.callback_query(F.data == "daily:post")
-async def daily_post_from_alert(callback: CallbackQuery) -> None:
-    await callback.answer()
-    try:
-        pending = get_pending_daily()
-        featured = pending[0] if pending else None
-        set_pending_daily(None)
-        await _build_and_send_daily_post(callback, featured_event=featured)
-    except Exception:
-        logger.exception("daily:post failed")
-        await callback.message.answer("Не удалось сгенерировать пост дня.")
-
-
-@router.callback_query(F.data == "daily:skip")
-async def daily_skip(callback: CallbackQuery) -> None:
-    await callback.answer()
-    set_pending_daily(None)
-    await callback.message.answer("Пост дня пропущен.")
-
-
-@router.callback_query(F.data == "daily:generate")
-async def daily_generate(callback: CallbackQuery) -> None:
-    await callback.answer()
-    try:
-        await _build_and_send_daily_post(callback)
-    except asyncio.TimeoutError:
-        await callback.message.answer("Таймаут. Повторите позже.")
-    except Exception:
-        logger.exception("daily:generate failed")
-        await callback.message.answer("Не удалось сгенерировать пост дня.")
 
 
 @router.callback_query(F.data.startswith("daily:pub:"))
@@ -581,7 +527,7 @@ async def daily_redo_text(callback: CallbackQuery) -> None:
     await callback.answer("Переписываю текст…")
     try:
         draft_id = int(callback.data.split(":")[2])
-        await _build_and_send_daily_post(callback, redo_text=True, draft_id=draft_id)
+        await _redo_daily_post(callback, redo_text=True, redo_image=False, draft_id=draft_id)
     except Exception:
         logger.exception("daily redo text failed")
         await callback.message.answer("Не удалось переделать текст.")
@@ -592,7 +538,7 @@ async def daily_redo_image(callback: CallbackQuery) -> None:
     await callback.answer("Новый постер…")
     try:
         draft_id = int(callback.data.split(":")[2])
-        await _build_and_send_daily_post(callback, redo_image=True, draft_id=draft_id)
+        await _redo_daily_post(callback, redo_text=False, redo_image=True, draft_id=draft_id)
     except Exception:
         logger.exception("daily redo image failed")
         await callback.message.answer("Не удалось переделать картинку.")
@@ -609,35 +555,6 @@ async def daily_cancel(callback: CallbackQuery) -> None:
         await callback.message.answer("Пост дня отменён.")
     except Exception:
         logger.exception("daily cancel failed")
-
-
-@router.callback_query(F.data == "week:generate")
-async def week_generate_poster(callback: CallbackQuery) -> None:
-    await callback.answer()
-    try:
-        user_id = callback.from_user.id
-        sess = week_editor_state.get(user_id)
-        if not sess:
-            await callback.message.answer(
-                "Сессия устарела. Нажми /events ещё раз (или введи /week — то же самое)."
-            )
-            return
-        events = sess["events"]
-        if not events:
-            await callback.message.answer("Нет событий для генерации.")
-            return
-
-        chat_id = callback.message.chat.id
-        async with show_typing(callback.bot, chat_id):
-            await callback.message.answer("Пишу афишу…")
-            post_text = await generate_weekly_poster(events)
-        draft_id = await insert_draft("week_post", post_text, "draft")
-        last_draft_state[user_id] = {"draft_id": draft_id, "events": events}
-        logger.info("draft created after generate: id=%s", draft_id)
-        await callback.message.answer(post_text, reply_markup=draft_actions_kb(draft_id))
-    except Exception:
-        logger.exception("week:generate failed")
-        await callback.message.answer("Не удалось сгенерировать афишу.")
 
 
 @router.message(Command("gemini_test"))
@@ -677,8 +594,8 @@ async def cmd_help_hint(message: Message) -> None:
     await message.answer(
         "Я отвечаю только на команды:\n"
         "/start — проверка, что бот на связи\n"
-        "/events — собрать события недели (Event Radar)\n"
-        "/daily — пост дня (одно главное событие ~24 ч)\n"
+        "/events — Event Radar (меню: неделя / 24 ч)\n"
+        "/daily — готовый пост на сегодня\n"
         "/check — проверка подключений API\n"
         "/gemini_test — тест Gemini и Google Search\n\n"
         "В меню Telegram: /start, /events, /daily, /check, /gemini_test. Команду /week можно ввести вручную — "
@@ -722,7 +639,7 @@ async def draft_redo(callback: CallbackQuery) -> None:
         new_draft_id = await insert_draft("week_post", new_text, "draft")
         last_draft_state[user_id] = {"draft_id": new_draft_id, "events": events}
         logger.info("draft regenerated: old_id=%s new_id=%s", old_draft_id, new_draft_id)
-        await callback.message.answer(new_text, reply_markup=draft_actions_kb(new_draft_id))
+        await callback.message.answer(new_text, reply_markup=post_result_kb(new_draft_id))
     except Exception:
         logger.exception("draft regenerate failed")
         await callback.message.answer("Не удалось переделать пост.")
