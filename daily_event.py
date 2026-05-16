@@ -69,22 +69,22 @@ def campaign_post_date(e: dict[str, Any]) -> date | None:
 def _daily_priority_score(e: dict[str, Any]) -> int:
     """Меньше = важнее для поста дня."""
     b = bar_event_blob(e)
+    if "eurovision" in b:
+        return 1
     if re.search(r"\bufc\b", b):
         if "main card" in b or "main event" in b or re.search(
             r"\bvs\.?\b", str(e.get("title", "")), re.I
         ):
-            return 1
-    if re.search(r"\bucl\b|champions\s+league|uefa\s+champions", b):
-        return 2
+            return 2
+    if "nba" in b and re.search(r"playoff|final|conference", b):
+        return 3
+    if "stanley" in b or ("nhl" in b and re.search(r"playoff|final|conference", b)):
+        return 4
     if re.search(r"formula\s*1|\bf1\b", b) and re.search(
         r"qualifying|sprint|\brace|grand\s+prix", b
     ):
-        return 3
-    if "eurovision" in b:
-        return 4
-    if "nba" in b and re.search(r"playoff|final|conference", b):
         return 5
-    if "stanley" in b or ("nhl" in b and re.search(r"playoff|final|conference", b)):
+    if re.search(r"\bucl\b|champions\s+league|uefa\s+champions", b):
         return 6
     if any(
         x in b

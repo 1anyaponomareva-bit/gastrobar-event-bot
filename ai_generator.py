@@ -166,7 +166,27 @@ async def generate_week_post(events: list[dict]) -> str:
 
 
 def _generate_daily_event_post_sync(event: dict) -> str:
-    event_json = json.dumps(event, ensure_ascii=False, indent=2)
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is not set")
+    safe = {
+        k: event.get(k)
+        for k in (
+            "title",
+            "subtitle",
+            "league",
+            "date",
+            "weekday",
+            "time",
+            "display_time",
+            "time_display",
+            "emoji",
+            "daily_timing_phrase",
+            "note",
+            "ufc_main_note",
+            "category",
+        )
+    }
+    event_json = json.dumps(safe, ensure_ascii=False, indent=2)
     timing = str(event.get("daily_timing_phrase", "скоро")).strip()
     display_time = str(
         event.get("display_time") or event.get("time_display") or event.get("time", "")
@@ -197,7 +217,10 @@ def _generate_daily_event_post_sync(event: dict) -> str:
 {event_json}
 """
     client = _client()
-    response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    try:
+        response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    except Exception as e:
+        raise RuntimeError(f"Gemini daily post: {e}") from e
     text = (response.text or "").strip()
     if not text:
         raise RuntimeError("Пустой ответ Gemini (daily post)")
@@ -213,12 +236,30 @@ async def generate_daily_event_post(event: dict) -> str:
 
 
 def _generate_daily_campaign_post_sync(events: list[dict]) -> str:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is not set")
     if not events:
         return "Сегодня без крупных эфиров — загляните в Gastrobar за пивом 🍺\n\n📍Океанус, улица с траками"
     if len(events) == 1:
         return _generate_daily_event_post_sync(events[0])
 
-    events_json = json.dumps(events, ensure_ascii=False, indent=2)
+    slim = [
+        {
+            k: e.get(k)
+            for k in (
+                "title",
+                "subtitle",
+                "date",
+                "weekday",
+                "display_time",
+                "emoji",
+                "daily_timing_phrase",
+                "note",
+            )
+        }
+        for e in events
+    ]
+    events_json = json.dumps(slim, ensure_ascii=False, indent=2)
     prompt = f"""{STYLE_SYSTEM}
 
 Напиши ОДИН готовый пост для Telegram Gastrobar про ближайшие крупные эфиры (пост дня).
@@ -240,7 +281,10 @@ def _generate_daily_campaign_post_sync(events: list[dict]) -> str:
 {events_json}
 """
     client = _client()
-    response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    try:
+        response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    except Exception as e:
+        raise RuntimeError(f"Gemini daily campaign: {e}") from e
     text = (response.text or "").strip()
     if not text:
         raise RuntimeError("Пустой ответ Gemini (daily campaign)")

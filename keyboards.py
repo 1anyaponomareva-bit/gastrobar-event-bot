@@ -97,7 +97,8 @@ def post_result_kb(draft_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def daily_post_kb(draft_id: int) -> InlineKeyboardMarkup:
+def daily_preview_kb(draft_id: int) -> InlineKeyboardMarkup:
+    """Превью поста дня: опубликовать / переделать / отмена."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -108,14 +109,8 @@ def daily_post_kb(draft_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="🔄 Переделать текст",
-                    callback_data=f"daily:redo_text:{draft_id}",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🖼 Переделать картинку",
-                    callback_data=f"daily:redo_img:{draft_id}",
+                    text="🔄 Переделать",
+                    callback_data=f"daily:redo:{draft_id}",
                 ),
             ],
             [
@@ -126,3 +121,7 @@ def daily_post_kb(draft_id: int) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def daily_post_kb(draft_id: int) -> InlineKeyboardMarkup:
+    return daily_preview_kb(draft_id)

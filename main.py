@@ -24,9 +24,12 @@ from aiogram.types import (
     Message,
 )
 
-from ai_generator import generate_daily_campaign_post, generate_weekly_poster
-from daily_event_posts import build_daily_content_package, deliver_daily_content_to_admin
-from image_finder import regenerate_event_image
+from ai_generator import generate_weekly_poster
+from daily_event_posts import (
+    build_daily_content_package,
+    deliver_daily_content,
+    user_error_message,
+)
 from api_checks import check_gemini, check_sports_api
 from bot_instance_lock import release_bot_lock, try_acquire_bot_lock
 import time
@@ -54,7 +57,6 @@ from database import (
     upsert_draft_asset,
 )
 from keyboards import (
-    daily_post_kb,
     post_result_kb,
     radar_menu_kb,
     radar_now24_result_kb,
@@ -447,16 +449,17 @@ async def radar_post_now24(callback: CallbackQuery) -> None:
             initial_text="📋 Готовлю пост на сегодня…\n✍️ Бот печатает…",
             progress_label="пост на сегодня",
         ):
-            pkg = await asyncio.wait_for(
-                build_daily_content_package(events),
+            result = await asyncio.wait_for(
+                build_daily_content_package(events, log_prefix="radar_post_now24"),
                 timeout=WEEK_FETCH_TIMEOUT_SEC,
             )
     except asyncio.TimeoutError:
         await callback.message.answer("Таймаут. Повторите позже.")
         return
-    if not pkg:
-        await callback.message.answer("Нет событий для поста на ближайшие 24 часа.")
+    if not result.ok or not result.package:
+        await callback.message.answer(user_error_message(result))
         return
+    pkg = result.package
     daily_post_state[callback.from_user.id] = {
         "draft_id": pkg.draft_id,
         "event": pkg.events[0] if pkg.events else {},
@@ -464,83 +467,13 @@ async def radar_post_now24(callback: CallbackQuery) -> None:
         "image_path": pkg.image_path,
         "poster_source": pkg.image_source,
     }
-    await deliver_daily_content_to_admin(
-        callback.bot, pkg, chat_id=callback.message.chat.id
-    )
-
-
-async def _redo_daily_post(
-    callback: CallbackQuery,
-    *,
-    redo_text: bool,
-    redo_image: bool,
-    draft_id: int,
-) -> None:
-    import json
-
-    state = daily_post_state.get(callback.from_user.id, {})
-    asset = await get_draft_asset(draft_id)
-    draft_row = await get_draft(draft_id)
-    if asset:
-        try:
-            events = json.loads(asset["event_json"])
-        except json.JSONDecodeError:
-            events = []
-        if not isinstance(events, list):
-            events = [events] if events else []
-    else:
-        events = state.get("events") or []
-    if not events:
-        await callback.message.answer("Нет данных события. Сгенерируйте пост заново.")
-        return
-
-    primary = events[0]
-    if redo_text:
-        text = await generate_daily_campaign_post(events)
-        await update_draft_text(draft_id, text)
-    else:
-        text = (draft_row or {}).get("text", "")
-
-    image_bytes = None
-    image_path = state.get("image_path")
-    poster_source = state.get("poster_source", "")
-    if redo_image:
-        image_bytes, poster_source, image_path = await regenerate_event_image(
-            primary, draft_id=draft_id
-        )
-        await upsert_draft_asset(
-            draft_id,
-            image_path=image_path or "",
-            event_json=asset["event_json"] if asset else json.dumps(events, ensure_ascii=False),
-            poster_source=poster_source,
-        )
-
-    daily_post_state[callback.from_user.id] = {
-        "draft_id": draft_id,
-        "events": events,
-        "event": primary,
-        "image_path": image_path,
-        "poster_source": poster_source,
-    }
-    chat_id = callback.message.chat.id
-    kb = daily_post_kb(draft_id)
-    if image_path and Path(image_path).is_file():
-        await callback.bot.send_photo(
-            chat_id, photo=FSInputFile(image_path), caption=text, reply_markup=kb
-        )
-    elif image_bytes:
-        await callback.bot.send_photo(
-            chat_id,
-            photo=BufferedInputFile(image_bytes, filename="daily_post.png"),
-            caption=text,
-            reply_markup=kb,
-        )
-    else:
-        await callback.message.answer(text, reply_markup=kb)
+    await deliver_daily_content(callback.bot, pkg, chat_id=chat_id)
 
 
 @router.message(Command("daily"))
 async def cmd_daily(message: Message) -> None:
+    logger.info("daily started (command /daily)")
+    user_id = message.from_user.id if message.from_user else 0
     try:
         async with long_operation_typing(
             message.bot,
@@ -548,30 +481,33 @@ async def cmd_daily(message: Message) -> None:
             initial_text="📋 Готовлю пост дня…\n✍️ Бот печатает…",
             progress_label="пост дня",
         ):
-            pkg = await asyncio.wait_for(
-                build_daily_content_package(),
+            result = await asyncio.wait_for(
+                build_daily_content_package(log_prefix="cmd_daily"),
                 timeout=WEEK_FETCH_TIMEOUT_SEC,
             )
-        if not pkg:
-            await message.answer(
-                "Нет крупных событий для поста сегодня. Попробуйте /events → 24 часа."
+        if not result.ok or not result.package:
+            logger.warning(
+                "cmd /daily failed: code=%s detail=%s",
+                result.error_code,
+                result.error_detail,
             )
+            await message.answer(user_error_message(result))
             return
-        daily_post_state[message.from_user.id] = {
+        pkg = result.package
+        daily_post_state[user_id] = {
             "draft_id": pkg.draft_id,
             "events": pkg.events,
-            "event": pkg.events[0],
+            "event": pkg.events[0] if pkg.events else {},
             "image_path": pkg.image_path,
             "poster_source": pkg.image_source,
         }
-        await deliver_daily_content_to_admin(
-            message.bot, pkg, chat_id=message.chat.id
-        )
+        await deliver_daily_content(message.bot, pkg, chat_id=message.chat.id)
     except asyncio.TimeoutError:
+        logger.warning("cmd /daily timeout")
         await message.answer("Таймаут. Повторите позже.")
     except Exception:
-        logger.exception("cmd /daily failed")
-        await message.answer("Не удалось сгенерировать пост дня.")
+        logger.exception("cmd /daily unexpected error")
+        await message.answer("Ошибка: unexpected error")
 
 
 @router.callback_query(F.data.startswith("daily:pub:"))
@@ -602,26 +538,52 @@ async def daily_publish(callback: CallbackQuery, bot: Bot) -> None:
         await callback.message.answer("Не удалось опубликовать пост дня.")
 
 
-@router.callback_query(F.data.startswith("daily:redo_text:"))
-async def daily_redo_text(callback: CallbackQuery) -> None:
-    await callback.answer("Переписываю текст…")
+@router.callback_query(F.data.startswith("daily:redo:"))
+async def daily_redo(callback: CallbackQuery) -> None:
+    await callback.answer("Переделываю пост…")
+    import json
+
+    user_id = callback.from_user.id
     try:
         draft_id = int(callback.data.split(":")[2])
-        await _redo_daily_post(callback, redo_text=True, redo_image=False, draft_id=draft_id)
+        state = daily_post_state.get(user_id, {})
+        events = state.get("events") or []
+        if not events:
+            asset = await get_draft_asset(draft_id)
+            if asset:
+                try:
+                    parsed = json.loads(asset["event_json"])
+                    events = parsed if isinstance(parsed, list) else [parsed]
+                except json.JSONDecodeError:
+                    events = []
+        if not events:
+            events = last_now24_events.get(user_id) or []
+        async with long_operation_typing(
+            callback.bot,
+            callback.message.chat.id,
+            initial_text="🔄 Переделываю пост дня…\n✍️ Бот печатает…",
+            progress_label="пост дня",
+        ):
+            result = await asyncio.wait_for(
+                build_daily_content_package(events, log_prefix="daily_redo"),
+                timeout=WEEK_FETCH_TIMEOUT_SEC,
+            )
+        if not result.ok or not result.package:
+            await callback.message.answer(user_error_message(result))
+            return
+        await update_draft_status(draft_id, "cancelled")
+        pkg = result.package
+        daily_post_state[user_id] = {
+            "draft_id": pkg.draft_id,
+            "events": pkg.events,
+            "event": pkg.events[0] if pkg.events else {},
+            "image_path": pkg.image_path,
+            "poster_source": pkg.image_source,
+        }
+        await deliver_daily_content(callback.bot, pkg, chat_id=callback.message.chat.id)
     except Exception:
-        logger.exception("daily redo text failed")
-        await callback.message.answer("Не удалось переделать текст.")
-
-
-@router.callback_query(F.data.startswith("daily:redo_img:"))
-async def daily_redo_image(callback: CallbackQuery) -> None:
-    await callback.answer("Новый постер…")
-    try:
-        draft_id = int(callback.data.split(":")[2])
-        await _redo_daily_post(callback, redo_text=False, redo_image=True, draft_id=draft_id)
-    except Exception:
-        logger.exception("daily redo image failed")
-        await callback.message.answer("Не удалось переделать картинку.")
+        logger.exception("daily redo failed")
+        await callback.message.answer("Не удалось переделать пост.")
 
 
 @router.callback_query(F.data.startswith("daily:cancel:"))
