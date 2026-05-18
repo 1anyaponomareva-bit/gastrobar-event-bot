@@ -300,7 +300,8 @@ CRITICAL TIME RULES:
 - For Eurovision use Europe/Zurich (or host city IANA). For UFC US cards use America/New_York or America/Los_Angeles.
 - For F1 use the circuit's local IANA zone (e.g. America/Toronto for Canada GP).
 
-Prefer returning a concrete row over skipping: only skip if no credible date+time from an official listing.
+Every row MUST have credible date AND time (HH:MM) from an official listing — Python discards rows without confirmed time.
+Do NOT return summary rows like "Premier League Final Day" without specific matches — one row per concrete match/session.
 
 BAR FILTER — NEVER include:
 - Chicago Med / Chicago Fire / Chicago P.D. / One Chicago (any spelling: PD, P.D., etc.)
@@ -878,7 +879,10 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
     prepared = [_prepare_for_afisha_selection(dict(e)) for e in verified]
     prepared = filter_events_by_participants(prepared, log_prefix="weekly_select")
 
-    log.info("weekly events found after prepare: %s", len(prepared))
+    from event_lock import has_confirmed_vn_time
+
+    prepared = [e for e in prepared if has_confirmed_vn_time(e)]
+    log.info("weekly events found after prepare+time: %s", len(prepared))
 
     eligible = [
         e
@@ -1054,19 +1058,14 @@ async def _fetch_radar_pipeline() -> tuple[
 
     if not verified_all and prelim:
         log.warning(
-            "Event Radar: verify dropped all %s candidates; pass-through medium",
+            "Event Radar: verify dropped all %s candidates; no unverified pass-through",
             len(prelim),
         )
-        for cand in prelim:
-            pt = event_from_search_candidate(
-                cand,
-                confidence="medium",
-                verification_reason="pass_through_after_verify_empty",
-            )
-            if pt:
-                verified_all.append(pt)
+
+    from event_lock import has_confirmed_vn_time
 
     verified_all = filter_events_for_bar_hours(verified_all)
+    verified_all = [v for v in verified_all if has_confirmed_vn_time(v)]
     for v in verified_all:
         _prepare_for_afisha_selection(v)
 
@@ -1099,18 +1098,9 @@ def _finalize_week_selection(pool: list[dict[str, Any]], prelim: list[dict[str, 
     final = _select_final_radar_events(pool)
     final = [e for e in final if not gastrobar_hard_reject(e)]
     if prelim and not final:
-        log.warning("Event Radar week: last-chance pass-through")
-        rescue = [
-            event_from_search_candidate(
-                c,
-                confidence="medium",
-                verification_reason="last_chance_pass_through",
-            )
-            for c in prelim[:RADAR_MAX_ITEMS]
-        ]
-        final = filter_events_for_bar_hours([e for e in rescue if e])[:RADAR_MAX_ITEMS]
-        for e in final:
-            _prepare_for_afisha_selection(e)
+        log.warning(
+            "Event Radar week: no confirmed events after selection (no last-chance rewrite)"
+        )
     return final
 
 
@@ -1145,66 +1135,18 @@ def format_radar_afisha(
     section_title: str = "🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
     apply_grouping: bool = True,
 ) -> str:
-    """Editorial weekly афиша (не API dump)."""
-    from event_grouping import apply_grouping_for_weekly_display, format_parallel_block_lines
-    from watchability import detect_editorial_type
+    """Weekly афиша: Python formatter only (locked events)."""
+    from event_lock import format_locked_weekly_afisha, lock_events_for_formatter
 
-    if not events:
-        return "Пока нет событий в подборке."
-
-    display = (
-        apply_grouping_for_weekly_display(events) if apply_grouping else list(events)
-    )
-    lines = [
-        section_title,
-        "",
-        "Что реально стоит смотреть на экранах Gastrobar на этой неделе:",
-        "",
-    ]
-
-    for e in display:
-        if str(e.get("afisha_kind", "")) == "parallel_block":
-            lines.extend(format_parallel_block_lines(e))
-            lines.append("")
-            continue
-
-        em = str(e.get("emoji", "🏟")).strip()
-        wd = str(e.get("weekday", "")).strip()
-        tm = str(
-            e.get("display_time") or e.get("time_display") or e.get("time", "")
-        ).strip()
-        title = str(e.get("title", "")).strip()
-        sub = str(e.get("subtitle", e.get("league", ""))).strip()
-        score = int(e.get("watchability_score", 0))
-        ufc_note = str(e.get("ufc_main_note", "")).strip()
-        hook = ""
-
-        if detect_editorial_type(e) == "nba" and score >= 88:
-            hook = "🔥 NBA — главный эфир недели"
-        elif detect_editorial_type(e) == "ufc" and score >= 80:
-            hook = "🥊 UFC Main Card"
-        elif score >= 85:
-            hook = "⭐ топ-эфир"
-
-        if hook:
-            lines.append(hook)
-        lines.append(f"{em} {wd} {tm}")
-        lines.append(title)
-        if sub and sub.lower() != title.lower():
-            lines.append(sub)
-        if ufc_note:
-            lines.append(ufc_note)
-        lines.append("")
-
-    lines.append("📍Океанус, улица с траками")
-    return "\n".join(lines).strip()
+    locked = lock_events_for_formatter(events, log_prefix="weekly_afisha")
+    log.info("FORMATTER RECEIVED EVENTS: count=%s", len(locked))
+    return format_locked_weekly_afisha(locked, section_title=section_title)
 
 
 def format_radar_week_message(events: list[dict[str, Any]]) -> str:
     body = format_radar_afisha(
         events,
         section_title="🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
-        apply_grouping=True,
     )
     return f"🔭 Event Radar · Week\n\n{body}"
 

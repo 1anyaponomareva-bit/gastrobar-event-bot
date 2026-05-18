@@ -9,7 +9,15 @@ from google import genai
 
 from config import GEMINI_API_KEY, GEMINI_MODEL
 
-from event_radar import format_radar_afisha
+import logging
+
+from event_lock import (
+    format_locked_weekly_afisha,
+    lock_events_for_formatter,
+    validate_formatter_output,
+)
+
+log = logging.getLogger(__name__)
 
 
 STYLE_SYSTEM = """Ты копирайтер бара Gastrobar. Пиши по-русски.
@@ -147,7 +155,10 @@ def _generate_sports_program_poster_sync(program: list[dict]) -> str:
 
 
 async def generate_weekly_poster(events: list[dict]) -> str:
-    """Event Radar: одна готовая афиша из данных без второго длинного Gemini-текста."""
+    """
+    Weekly poster — ТОЛЬКО Python formatter на locked events.
+    Gemini НЕ выбирает и НЕ переписывает события.
+    """
     if not events:
         return "Нет данных для афиши."
     first = events[0]
@@ -155,9 +166,18 @@ async def generate_weekly_poster(events: list[dict]) -> str:
         return await asyncio.to_thread(_generate_sports_program_poster_sync, events)
     if first.get("kind") in ("match", "block"):
         return await asyncio.to_thread(_generate_sports_program_poster_sync, events)
-    # Event Radar: те же словари, что в /events — не проверяем только events[0] и поле time:
-    # иначе ложно срабатывало «устарела / нет данных», хотя афиша только что собралась.
-    return format_radar_afisha(events)
+
+    locked = lock_events_for_formatter(events, log_prefix="weekly_poster")
+    log.info("FORMATTER RECEIVED EVENTS (weekly_poster): count=%s", len(locked))
+    body = format_locked_weekly_afisha(locked)
+    ok, missing = validate_formatter_output(body, locked)
+    if not ok:
+        log.error(
+            "weekly poster validation failed, regenerating python-only: missing=%s",
+            missing,
+        )
+        body = format_locked_weekly_afisha(locked)
+    return body
 
 
 async def generate_week_post(events: list[dict]) -> str:

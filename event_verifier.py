@@ -669,8 +669,14 @@ def _gemini_verify_sync(event: dict[str, Any]) -> dict[str, Any] | None:
     tp = str(data.get("time_precision", time_precision)).lower().strip()
     if tp not in ("exact", "estimated", "unknown"):
         tp = time_precision if time_precision in ("exact", "estimated") else "exact"
+    if tp == "unknown":
+        logger.info("skipped_unknown_time after verify: %s", event.get("title"))
+        return None
     tm = conv["time"]
-    disp = tm if tp == "exact" else (f"≈{tm}" if tp == "estimated" else "время уточняется")
+    if not tm:
+        logger.info("skipped_empty_time after verify: %s", event.get("title"))
+        return None
+    disp = tm if tp == "exact" else f"≈{tm}"
 
     title = str(data.get("title", "")).strip() or str(event.get("title", "")).strip()
     cat = str(data.get("category", event.get("category", ""))).strip() or "EVENT"
@@ -761,25 +767,22 @@ def event_from_search_candidate(
     conv, time_precision = convert_event_to_vn(event)
 
     if conv is None:
-        time_display = "время уточняется"
-        out_date = orig_date
-        out_time = ""
-        out_weekday = ""
-        try:
-            d_obj = date.fromisoformat(orig_date)
-            out_weekday = _WD_RU[d_obj.weekday()]
-        except ValueError:
-            pass
+        _log_verify_removed(title, "no_timezone_convert", event)
+        return None
+
+    out_date = conv["date"]
+    out_time = conv["time"]
+    out_weekday = conv["weekday"]
+    if not out_time or not out_weekday:
+        _log_verify_removed(title, "missing_vn_time", event)
+        return None
+    if time_precision == "unknown":
+        _log_verify_removed(title, "time_precision_unknown", event)
+        return None
+    if time_precision == "estimated":
+        time_display = f"≈{out_time}"
     else:
-        out_date = conv["date"]
-        out_time = conv["time"]
-        out_weekday = conv["weekday"]
-        if time_precision == "unknown":
-            time_display = "время уточняется"
-        elif time_precision == "estimated":
-            time_display = f"≈{out_time}"
-        else:
-            time_display = out_time
+        time_display = out_time
 
     cat = str(event.get("category", "EVENT")).strip()[:48] or "EVENT"
     subtitle = str(event.get("subtitle", event.get("league", ""))).strip()

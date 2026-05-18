@@ -34,8 +34,8 @@ def _parse_display_minutes(e: dict[str, Any]) -> int | None:
     raw = str(
         e.get("display_time") or e.get("time_display") or e.get("time", "")
     ).strip()
-    if raw == "время уточняется":
-        return 12 * 60
+    if raw == "время уточняется" or not raw:
+        return None
     norm, _ = _parse_time_flexible(raw)
     return norm and int(norm.split(":")[0]) * 60 + int(norm.split(":")[1])
 
