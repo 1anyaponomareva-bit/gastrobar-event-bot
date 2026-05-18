@@ -1115,7 +1115,7 @@ def _finalize_week_selection(pool: list[dict[str, Any]], prelim: list[dict[str, 
 
 
 async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, str | None]:
-    """Афиша недели: до 6 главных событий."""
+    """Афиша недели: editorial подбор до RADAR_WEEKLY_MAX событий."""
     pool, raw_total, prelim, fetch_note = await _fetch_radar_pipeline()
     if fetch_note == "sports_fallback":
         final = pool[:RADAR_MAX_ITEMS]
@@ -1143,12 +1143,31 @@ def format_radar_afisha(
     events: list[dict[str, Any]],
     *,
     section_title: str = "🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
+    apply_grouping: bool = True,
 ) -> str:
-    """Список событий для Telegram (без верхнего заголовка режима)."""
+    """Editorial weekly афиша (не API dump)."""
+    from event_grouping import apply_grouping_for_weekly_display, format_parallel_block_lines
+    from watchability import detect_editorial_type
+
     if not events:
         return "Пока нет событий в подборке."
-    lines = [section_title, ""]
-    for e in events:
+
+    display = (
+        apply_grouping_for_weekly_display(events) if apply_grouping else list(events)
+    )
+    lines = [
+        section_title,
+        "",
+        "Что реально стоит смотреть на экранах Gastrobar на этой неделе:",
+        "",
+    ]
+
+    for e in display:
+        if str(e.get("afisha_kind", "")) == "parallel_block":
+            lines.extend(format_parallel_block_lines(e))
+            lines.append("")
+            continue
+
         em = str(e.get("emoji", "🏟")).strip()
         wd = str(e.get("weekday", "")).strip()
         tm = str(
@@ -1156,17 +1175,27 @@ def format_radar_afisha(
         ).strip()
         title = str(e.get("title", "")).strip()
         sub = str(e.get("subtitle", e.get("league", ""))).strip()
-        note = str(e.get("note", "")).strip()
+        score = int(e.get("watchability_score", 0))
         ufc_note = str(e.get("ufc_main_note", "")).strip()
+        hook = ""
+
+        if detect_editorial_type(e) == "nba" and score >= 88:
+            hook = "🔥 NBA — главный эфир недели"
+        elif detect_editorial_type(e) == "ufc" and score >= 80:
+            hook = "🥊 UFC Main Card"
+        elif score >= 85:
+            hook = "⭐ топ-эфир"
+
+        if hook:
+            lines.append(hook)
         lines.append(f"{em} {wd} {tm}")
         lines.append(title)
         if sub and sub.lower() != title.lower():
             lines.append(sub)
         if ufc_note:
             lines.append(ufc_note)
-        elif note:
-            lines.append(note)
         lines.append("")
+
     lines.append("📍Океанус, улица с траками")
     return "\n".join(lines).strip()
 
@@ -1175,6 +1204,7 @@ def format_radar_week_message(events: list[dict[str, Any]]) -> str:
     body = format_radar_afisha(
         events,
         section_title="🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
+        apply_grouping=True,
     )
     return f"🔭 Event Radar · Week\n\n{body}"
 

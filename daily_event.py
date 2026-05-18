@@ -76,11 +76,13 @@ def _daily_priority_score(e: dict[str, Any]) -> int:
             return 1
     if "eurovision" in b:
         return 2
+    if "nba" in b and re.search(
+        r"finals|conference\s+final|playoff|game\s*[1-7]", b
+    ):
+        return 3
     if re.search(
         r"\bucl\b|champions\s+league|uefa\s+champions|europa\s+league|\buel\b", b
     ):
-        return 3
-    if "nba" in b and re.search(r"playoff|final|conference", b):
         return 4
     if re.search(r"formula\s*1|\bf1\b", b) and re.search(
         r"qualifying|sprint|\brace|grand\s+prix", b
@@ -312,3 +314,75 @@ def get_next_featured_event(
         best.get("display_time"),
     )
     return best
+
+
+def select_nearest_upcoming(
+    events: list[dict[str, Any]] | None = None,
+    *,
+    now: datetime | None = None,
+    within_days: int = 7,
+) -> list[dict[str, Any]]:
+    """Ближайшее событие из кэша (если в next24 пусто)."""
+    from event_participants import is_gastrobar_eligible
+    from watchability import enrich_watchability
+
+    now = now or _vn_now()
+    horizon = now + timedelta(days=within_days)
+    pool = events or []
+    future: list[dict[str, Any]] = []
+
+    for e in pool:
+        ev = enrich_watchability(dict(e))
+        if not is_gastrobar_eligible(ev):
+            continue
+        start = event_start_datetime_vn(ev)
+        if not start or start <= now or start > horizon:
+            continue
+        future.append(enrich_daily_campaign_meta(ev, now))
+
+    if not future:
+        log.info("daily: no upcoming events within %s days", within_days)
+        return []
+
+    future.sort(
+        key=lambda x: (
+            event_start_datetime_vn(x) or datetime.max.replace(tzinfo=TZ),
+            -int(x.get("watchability_score", 0)),
+        )
+    )
+    best = future[0]
+    log.info(
+        "daily nearest upcoming: title=%r start=%s watchability=%s",
+        best.get("title"),
+        event_start_datetime_vn(best),
+        best.get("watchability_score"),
+    )
+    return [best]
+
+
+def format_upcoming_preview_message(events: list[dict[str, Any]]) -> str:
+    """Сообщение, когда в 24ч пусто, но есть ближайший эфир."""
+    if not events:
+        return "Крупных событий для Gastrobar в ближайшие 24 часа не найдено."
+
+    e = events[0]
+    sched = str(e.get("weekday", "")).strip()
+    tm = str(e.get("display_time") or e.get("time", "")).strip()
+    title = str(e.get("title", "")).strip()
+    start = event_start_datetime_vn(e)
+    when = ""
+    if start:
+        delta = start - _vn_now()
+        hours = int(delta.total_seconds() // 3600)
+        if hours < 48:
+            when = f"через ~{hours} ч"
+        else:
+            when = f"{sched} {tm}".strip()
+
+    return (
+        "В ближайшие 24 часа крупных эфиров нет — но вот что скоро в афише:\n\n"
+        f"📅 {when}\n"
+        f"⭐ {title}\n\n"
+        "Можно подготовить пост заранее: нажмите /daily ещё раз ближе к эфиру "
+        "или «Пост дня» после обновления афиши."
+    )

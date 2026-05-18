@@ -161,7 +161,29 @@ def _count_tokens(text: str, tokens: tuple[str, ...]) -> int:
     return sum(1 for tok in tokens if tok in t)
 
 
+_WEAK_FOOTBALL_MARKERS = (
+    "u21",
+    "u-21",
+    "u19",
+    "u-19",
+    "u23",
+    "youth",
+    "under-21",
+    "under 21",
+    "fa cup first round",
+    "efl trophy",
+    "league one",
+    "league two",
+    "national league",
+    "conference south",
+    "conference north",
+)
+
+
 def _football_watchability(b: str, title: str) -> tuple[int, str]:
+    if any(m in b for m in _WEAK_FOOTBALL_MARKERS):
+        return 0, "weak_league"
+
     score = 38
     reasons: list[str] = []
 
@@ -199,35 +221,45 @@ def _football_watchability(b: str, title: str) -> tuple[int, str]:
 
 
 def _nba_watchability(b: str, title: str) -> tuple[int, str]:
-    score = 30
+    """NBA — высокий приоритет для Gastrobar (выше обычного EPL)."""
+    if re.search(r"nba\s+finals", b) or (
+        re.search(r"\bfinals\b", b) and "conference" not in b and "nba" in b
+    ):
+        return 96, "nba_finals"
+
+    if re.search(
+        r"western\s+conference\s+final|eastern\s+conference\s+final|"
+        r"conference\s+finals|nba\s+conference\s+final",
+        b,
+    ):
+        return 92, "nba_conf_final"
+
+    if re.search(r"conference\s+final", b) and "nba" in b:
+        return 90, "nba_conf_final"
+
+    score = 42
     reasons: list[str] = []
     teams = _count_tokens(b + " " + title.lower(), NBA_TOP_TEAMS)
 
     if has_matchup_in_title(title):
-        score += 22
+        score += 24
         reasons.append("matchup")
     if teams >= 2:
-        score += 28
+        score += 26
         reasons.append("top_vs_top")
     elif teams == 1:
-        score += 14
+        score += 12
         reasons.append("top_team")
 
-    if re.search(r"nba\s+finals|\bfinals\b", b):
-        score += 26
-        reasons.append("finals")
-    elif re.search(r"conference\s+final", b):
-        score += 22
-        reasons.append("conf_final")
-    elif "playoff" in b:
-        score += 16
+    if "playoff" in b:
+        score += 28
         reasons.append("playoffs")
-    elif teams >= 2:
-        score += 12
-        reasons.append("regular_top")
+        if re.search(r"game\s*[1-7]|game\s*\d", b):
+            score += 10
+            reasons.append("playoff_game")
 
-    if teams == 0 and "playoff" not in b and "final" not in b:
-        score -= 25
+    if teams == 0 and "playoff" not in b:
+        score -= 28
         reasons.append("weak_regular")
 
     return min(100, max(0, score)), "+".join(reasons) or "nba"
@@ -284,16 +316,16 @@ def _f1_watchability(b: str) -> tuple[int, str]:
 def _ufc_watchability(b: str, title: str) -> tuple[int, str]:
     if re.search(r"prelim|early\s+prelim", b) and "main" not in b:
         return 18, "prelims_only"
-    score = 35
+    score = 50
     reasons: list[str] = []
     if has_matchup_in_title(title):
         score += 35
         reasons.append("bout")
     if re.search(r"title\s+fight|championship", b):
-        score += 28
+        score += 32
         reasons.append("title")
     if "main card" in b or "main event" in b:
-        score += 22
+        score += 30
         reasons.append("main_card")
     if re.search(r"ufc\s+fight\s+night", b) and has_matchup_in_title(title):
         score += 12

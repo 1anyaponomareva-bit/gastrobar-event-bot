@@ -22,7 +22,11 @@ from daily_display import (
     format_single_daily_post_template,
     post_text_includes_schedule,
 )
-from daily_event import select_now24_events
+from daily_event import (
+    format_upcoming_preview_message,
+    select_nearest_upcoming,
+    select_now24_events,
+)
 from database import (
     insert_draft,
     record_scheduled_post,
@@ -128,12 +132,21 @@ async def resolve_daily_events(
     if not force_fresh_fallback:
         if not cached:
             return [], "cache_empty"
+        upcoming = select_nearest_upcoming(cached)
+        if upcoming:
+            log.info("daily: using nearest upcoming (no events in 24h)")
+            return upcoming, "upcoming_preview"
         log.info("daily: no events in 24h window from weekly cache")
         return [], "no_events_in_cache"
 
     fresh, _ = await collect_daily_candidates_fresh()
     if fresh:
         return fresh, "fresh_fallback"
+    cached_after = await get_weekly_events_cache()
+    upcoming = select_nearest_upcoming(cached_after)
+    if upcoming:
+        log.info("daily: nearest upcoming after fresh search empty")
+        return upcoming, "upcoming_preview"
     return [], "no_events"
 
 
@@ -245,6 +258,11 @@ async def build_daily_content_package(
                 ),
             )
 
+        is_upcoming_preview = source_tag == "upcoming_preview"
+        if is_upcoming_preview:
+            preview_msg = format_upcoming_preview_message(now24)
+            log.info("%s: upcoming preview mode for %r", log_prefix, now24[0].get("title"))
+
         for e in now24:
             log.info(
                 "daily selected event: title=%r source=%s display_time=%s",
@@ -288,7 +306,12 @@ async def build_daily_content_package(
         post_events = verified if len(verified) > 1 else [verified[0]]
         log.info("%s generate text started (events=%s)", log_prefix, len(post_events))
         try:
-            post_text = await _generate_post_text(post_events)
+            if is_upcoming_preview:
+                post_text = preview_msg + "\n\n---\n\n" + await _generate_post_text(
+                    post_events
+                )
+            else:
+                post_text = await _generate_post_text(post_events)
             if not (post_text or "").strip():
                 raise RuntimeError("empty post text")
             log.info("%s generate text result: ok len=%s", log_prefix, len(post_text))

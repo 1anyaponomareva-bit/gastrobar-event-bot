@@ -5,6 +5,7 @@ Editorial formatters — посты Gastrobar по типу события.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable
 
 from daily_display import format_event_schedule_line
@@ -67,11 +68,26 @@ def format_football_post(e: dict[str, Any]) -> str:
 
 
 def format_nba_post(e: dict[str, Any]) -> str:
+    from event_verifier import bar_event_blob
+
     em = str(e.get("emoji", "🏀")).strip() or "🏀"
     sched = format_event_schedule_line(e)
     title = str(e.get("title", "")).strip()
     sub = str(e.get("subtitle", e.get("league", ""))).strip()
     hook = _timing_hook(e)
+    b = bar_event_blob(e)
+
+    context = ""
+    if re.search(r"western\s+conference\s+final", b):
+        context = "Старт финала Западной конференции."
+    elif re.search(r"eastern\s+conference\s+final", b):
+        context = "Старт финала Восточной конференции."
+    elif re.search(r"conference\s+final", b):
+        context = "Финал конференции — серия на вылет."
+    elif re.search(r"nba\s+finals|\bfinals\b", b):
+        context = "Финал NBA — главная серия."
+    elif "playoff" in b:
+        context = "Плей-офф NBA — важная игра."
 
     lines = [
         f"{hook} включаем NBA {em}",
@@ -81,8 +97,11 @@ def format_nba_post(e: dict[str, Any]) -> str:
     ]
     if sub and sub.lower() != title.lower():
         lines.append(sub)
-    elif "playoff" in sub.lower() or "final" in sub.lower():
-        lines.append(sub)
+    if context:
+        lines.append("")
+        lines.append(context)
+        if re.search(r"game\s*1|первая\s+игра", b):
+            lines.append("Первая игра серии.")
     lines.extend(_bar_lines())
     log.info("formatter used: format_nba_post title=%r", title)
     return "\n".join(lines)

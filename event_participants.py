@@ -135,6 +135,21 @@ def _is_concert_or_show(b: str) -> bool:
     )
 
 
+def is_weak_football_competition(e: dict[str, Any]) -> bool:
+    b = bar_event_blob(e)
+    weak = (
+        "u21",
+        "u-21",
+        "u19",
+        "youth",
+        "under-21",
+        "league one",
+        "league two",
+        "national league",
+    )
+    return any(m in b for m in weak)
+
+
 def passes_participant_rules(e: dict[str, Any]) -> tuple[bool, str]:
     """
     True — событие можно показывать в афише.
@@ -144,6 +159,9 @@ def passes_participant_rules(e: dict[str, Any]) -> tuple[bool, str]:
     subtitle = str(e.get("subtitle", e.get("league", ""))).strip()
     b = bar_event_blob(e)
     cat = str(e.get("category", "")).strip().upper()
+
+    if is_weak_football_competition(e):
+        return False, "weak_football_league"
 
     if not title:
         return False, "missing_title"
