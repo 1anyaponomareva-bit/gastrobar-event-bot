@@ -1053,10 +1053,14 @@ async def _fetch_radar_pipeline() -> tuple[
             return fallback, fb_raw, [], "sports_fallback"
 
     results = await asyncio.gather(*[verify_event(e) for e in prelim])
+    from locked_time import has_locked_schedule, lock_event_schedule
+
     verified_all: list[dict[str, Any]] = []
     verify_dropped = 0
     for cand, r in zip(prelim, results):
         if r and str(r.get("confidence", "medium")).lower() in ("high", "medium"):
+            if not has_locked_schedule(r):
+                r = lock_event_schedule(r, phase="weekly_pipeline") or r
             verified_all.append(r)
         else:
             verify_dropped += 1

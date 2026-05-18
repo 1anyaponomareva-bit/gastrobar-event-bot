@@ -269,34 +269,9 @@ def reconcile_event_datetime(
     cached: dict[str, Any],
     fresh: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """
-    Weekly cache = source of truth. При расхождении UTC — оставляем кэш.
-    """
-    if fresh is None:
-        return dict(cached)
-    if not has_locked_datetime(cached):
-        return fresh
-    result = dict(fresh)
-    c_utc = str(cached.get("utc_datetime", "")).strip()
-    f_utc = str(fresh.get("utc_datetime", "")).strip()
-    if c_utc and f_utc and c_utc != f_utc:
-        log.error(
-            "DATETIME MISMATCH weekly vs fresh: title=%r cached_utc=%s fresh_utc=%s "
-            "— using weekly cached local time",
-            cached.get("title"),
-            c_utc,
-            f_utc,
-        )
-        for key in _DATETIME_CANONICAL_KEYS:
-            if key in cached and cached.get(key) is not None:
-                result[key] = cached[key]
-        result["time_locked"] = True
-    elif c_utc:
-        for key in _DATETIME_CANONICAL_KEYS:
-            if cached.get(key) is not None:
-                result[key] = cached[key]
-        result["time_locked"] = True
-    return result
+    from locked_time import assert_no_time_drift
+
+    return assert_no_time_drift(cached, fresh or cached, context="reconcile")
 
 
 def get_event_start_vn(event: dict[str, Any]) -> datetime | None:
@@ -321,71 +296,10 @@ def get_event_start_vn(event: dict[str, Any]) -> datetime | None:
 
 
 def apply_event_datetime(event: dict[str, Any]) -> dict[str, Any] | None:
-    """
-    Единый pipeline: source → UTC (once) → VN local fields (once).
-    Повторная конвертация запрещена, если уже есть utc_datetime.
-    """
-    out = dict(event)
-    utc_raw = str(out.get("utc_datetime", "")).strip()
-    if utc_raw:
-        utc_dt = parse_datetime_iso(utc_raw)
-        if utc_dt is None:
-            log.error("bad utc_datetime on locked event: %r", out.get("title"))
-            return None
-        fields = utc_datetime_to_local_fields(utc_dt)
-        out.update(fields)
-        prec = str(out.get("time_precision", "exact")).lower()
-        tm = out["local_time"]
-        out["time_display"] = f"≈{tm}" if prec == "estimated" else tm
-        if not out.get("display_time") or out.get("display_time") == "время уточняется":
-            out["display_time"] = out["time_display"].removeprefix("≈")
-        out["time_locked"] = True
-        log_datetime_pipeline(out)
-        sanity_check_football_vn_time(out)
-        return out
+    """Delegate to locked_time — no inference, no double conversion."""
+    from locked_time import lock_event_schedule
 
-    date_s, time_s, src_tz = extract_source_fields_for_conversion(out)
-    if not src_tz:
-        inferred = infer_source_timezone(out)
-        if inferred:
-            log.info("TIME INFERRED TZ: %s for %r", inferred, out.get("title"))
-            src_tz = inferred
-    if not _DATE_RE.match(date_s):
-        return None
-    time_norm, is_approx = _parse_time_flexible(time_s)
-    if not time_norm:
-        return None
-    if not src_tz or not is_valid_source_timezone(src_tz):
-        log.warning(
-            "TIME: unknown timezone for %r tz=%r",
-            out.get("title"),
-            src_tz,
-        )
-        return None
-
-    try:
-        utc_dt = source_to_utc_datetime(date_s, time_norm, src_tz)
-    except Exception as e:
-        log.error("TIME CONVERT failed: %s", e, exc_info=True)
-        return None
-
-    fields = utc_datetime_to_local_fields(utc_dt)
-    out.update(fields)
-    out.setdefault("original_date", date_s)
-    out.setdefault("original_time", time_norm)
-    out.setdefault("original_timezone", src_tz)
-    out.setdefault("source_timezone", src_tz)
-    prec = "estimated" if is_approx else str(out.get("time_precision", "exact")).lower()
-    if prec not in ("exact", "estimated", "unknown"):
-        prec = "exact"
-    out["time_precision"] = prec
-    tm = out["local_time"]
-    out["time_display"] = f"≈{tm}" if prec == "estimated" else tm
-    out["display_time"] = tm
-    out["time_locked"] = True
-    log_datetime_pipeline(out)
-    sanity_check_football_vn_time(out)
-    return out
+    return lock_event_schedule(event, phase="apply_event_datetime")
 
 
 def infer_source_timezone(event: dict[str, Any]) -> str | None:

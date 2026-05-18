@@ -574,14 +574,15 @@ async def _match_apisports(event: dict[str, Any], branch: str) -> dict[str, Any]
         ok_b = any(w in blob for w in _tokenize(sides[1]))
         if not (ok_a and ok_b) and best[0] < 0.58:
             return None
-    conv = _iso_to_nhatrang(row.get("dt_iso") or "")
-    if not conv:
+    dt_iso = str(row.get("dt_iso") or "").strip()
+    if not dt_iso:
         return None
     cat = str(event.get("category", "SPORT"))
     subtitle = str(event.get("subtitle", event.get("league", ""))).strip() or row.get(
         "league", ""
     )
-    dt_iso = str(row.get("dt_iso") or "").strip()
+    from locked_time import lock_event_from_api_utc_iso
+
     out = {
         "category": cat,
         "title": row.get("title") or title_cand,
@@ -591,21 +592,11 @@ async def _match_apisports(event: dict[str, Any], branch: str) -> dict[str, Any]
             {"title": row.get("title") or title_cand, "category": cat, "subtitle": subtitle}
         ),
         "why": "",
-        "time_precision": "exact",
         "verified_via": "API-SPORTS",
         "confidence": "high",
         "verification_reason": "api_sports_match",
-        "utc_datetime": conv.get("utc_datetime"),
-        "original_timezone": "UTC",
     }
-    if dt_iso:
-        parsed = parse_datetime_iso(dt_iso)
-        if parsed is not None:
-            utc_aware = parsed.astimezone(ZoneInfo("UTC"))
-            out["original_date"] = utc_aware.date().isoformat()
-            out["original_time"] = utc_aware.strftime("%H:%M")
-    applied = apply_event_datetime(out)
-    return applied
+    return lock_event_from_api_utc_iso(out, dt_iso, phase="api_sports")
 
 
 def _truthy_verified(v: Any) -> bool:
@@ -737,7 +728,9 @@ def _gemini_verify_sync(event: dict[str, Any]) -> dict[str, Any] | None:
         "utc_datetime": conv.get("utc_datetime"),
         "local_datetime": conv.get("local_datetime"),
     }
-    return apply_event_datetime(built)
+    from locked_time import lock_event_schedule
+
+    return lock_event_schedule(built, phase="gemini_strict")
 
 
 def _log_verify_removed(title: str, reason: str, event: dict[str, Any]) -> None:
@@ -767,22 +760,18 @@ def event_from_search_candidate(
     """
     Событие из Gemini Search: конвертация времени только в Python (event_time).
     """
-    from event_time import (
-        apply_event_datetime,
-        convert_event_to_vn,
-        extract_source_fields,
-        has_locked_datetime,
-    )
+    from locked_time import has_locked_schedule, lock_event_schedule
+    from event_time import convert_event_to_vn, extract_source_fields
 
     title = str(event.get("title", "")).strip()
     if not title or len(title) < 3:
         _log_verify_removed(title, "missing_title", event)
         return None
 
-    if has_locked_datetime(event):
-        applied = apply_event_datetime(dict(event))
+    if has_locked_schedule(event):
+        applied = lock_event_schedule(dict(event), phase="search_preserve")
         if applied is None:
-            _log_verify_removed(title, "locked_datetime_invalid", event)
+            _log_verify_removed(title, "locked_schedule_invalid", event)
             return None
         out = applied
         out.setdefault("verified_via", verified_via)
@@ -840,9 +829,9 @@ def event_from_search_candidate(
             "utc_datetime": conv.get("utc_datetime"),
             "local_datetime": conv.get("local_datetime"),
         }
-        applied = apply_event_datetime(out)
+        applied = lock_event_schedule(out, phase="search_lock")
         if applied is None:
-            _log_verify_removed(title, "apply_datetime_failed", event)
+            _log_verify_removed(title, "lock_schedule_failed", event)
             return None
         out = applied
         if not out.get("time") or not out.get("weekday"):
@@ -884,25 +873,21 @@ async def verify_event(event: dict[str, Any]) -> dict[str, Any] | None:
   - entertainment/esports: medium из Gemini Search (без второго verify по умолчанию)
   - RADAR_STRICT_VERIFY=1 — дополнительно старый жёсткий Gemini verify
     """
-    from event_time import has_locked_datetime
+    from locked_time import has_locked_schedule, lock_event_schedule
 
     async with _verify_sem:
         title = str(event.get("title", "")).strip()
         category = str(event.get("category", "")).strip()
         logger.info("VERIFY INPUT: %s", event)
 
-        if has_locked_datetime(event):
-            preserved = event_from_search_candidate(
-                event,
-                confidence=str(event.get("confidence", "medium")),
-                verified_via=str(event.get("verified_via", "weekly_cache")),
-                verification_reason="datetime_locked_no_reconvert",
-            )
+        if has_locked_schedule(event):
+            preserved = lock_event_schedule(dict(event), phase="verify_preserve")
             if preserved:
                 logger.info(
-                    "VERIFY: preserved locked datetime title=%r utc=%s",
+                    "VERIFY: preserved locked schedule title=%r utc=%s local=%s",
                     title,
                     preserved.get("utc_datetime"),
+                    preserved.get("local_datetime"),
                 )
                 return preserved
 

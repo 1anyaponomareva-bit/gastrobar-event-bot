@@ -208,22 +208,23 @@ def apply_bar_hours(event: dict[str, Any]) -> dict[str, Any] | None:
         )
         return None
 
-    time_raw = str(event.get("time", "")).strip()
+    time_raw = str(event.get("local_time") or event.get("time", "")).strip()
     start_m = _parse_hhmm(time_raw)
     original_time = time_raw or "?"
     date_s = str(event.get("date", "")).strip()
 
     if start_m is None:
         out = dict(event)
-        out["display_time"] = str(event.get("time_display") or event.get("time") or "время уточняется")
-        out["original_time"] = original_time
+        bt = str(out.get("local_time") or out.get("time") or "").strip()
+        if bt:
+            out["display_time"] = bt
+            out["broadcast_time"] = bt
         out["bar_hours_decision"] = "keep_unknown_time"
         out["bar_hours_reason"] = "no_parseable_time"
         log.info(
-            "bar_hours: title=%r original_time=%s display_time=%s decision=keep reason=no_parseable_time",
+            "bar_hours: title=%r decision=keep reason=no_parseable_time broadcast=%s",
             event.get("title"),
-            original_time,
-            out["display_time"],
+            bt,
         )
         return out
 
@@ -274,33 +275,33 @@ def apply_bar_hours(event: dict[str, Any]) -> dict[str, Any] | None:
         )
         return None
 
-    display_time = _fmt_hhmm(display_m)
     out = dict(event)
-    out["original_time"] = _fmt_hhmm(start_m) if original_time != "?" else original_time
-    out["display_time"] = display_time
+    broadcast = str(
+        out.get("local_time") or out.get("time") or _fmt_hhmm(start_m)
+    ).strip()
+    out["broadcast_time"] = broadcast
+    # Schedule fields are immutable — never rewrite kickoff for bar hours.
+    out["display_time"] = broadcast
+    prec = str(out.get("time_precision", "exact")).lower()
     out["time_display"] = (
-        f"≈{display_time}" if out.get("time_precision") == "estimated" else display_time
+        f"≈{broadcast}" if prec == "estimated" else broadcast
     )
     if note:
         out["note"] = note
+        out["bar_hours_note"] = note
     else:
         out.pop("note", None)
+        out.pop("bar_hours_note", None)
     out["bar_hours_decision"] = decision
     out["bar_hours_reason"] = reason
 
-    if date_s and display_m != start_m:
-        wd = _weekday_ru_for(date_s, display_time)
-        if wd:
-            out["weekday"] = wd
-
     log.info(
-        "bar_hours: title=%r original_time=%s display_time=%s decision=%s reason=%s long=%s",
+        "bar_hours: title=%r broadcast_time=%s (unchanged) decision=%s reason=%s note=%r",
         event.get("title"),
-        out["original_time"],
-        display_time,
+        broadcast,
         decision,
         reason,
-        long_ev,
+        note,
     )
     return out
 

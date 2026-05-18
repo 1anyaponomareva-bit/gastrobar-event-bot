@@ -17,11 +17,13 @@ _TIME_OK_RE = re.compile(r"^(≈)?\d{1,2}:\d{2}$")
 
 def has_confirmed_vn_time(e: dict[str, Any]) -> bool:
     """Только подтверждённые date + weekday + HH:MM (VN). Без «время уточняется»."""
-    date_s = str(e.get("date", "")).strip()
-    wd = str(e.get("weekday", "")).strip()
-    raw = str(
-        e.get("display_time") or e.get("time_display") or e.get("time", "")
-    ).strip()
+    from locked_time import has_locked_schedule
+
+    if not has_locked_schedule(e):
+        return False
+    date_s = str(e.get("local_date") or e.get("date", "")).strip()
+    wd = str(e.get("local_weekday") or e.get("weekday", "")).strip()
+    raw = str(e.get("local_time") or e.get("display_time") or e.get("time", "")).strip()
     if not date_s or not wd:
         return False
     if not raw or raw == "время уточняется":
@@ -43,19 +45,29 @@ class LockedEvent:
     emoji: str
     participants: str
     lock_id: str
+    utc_datetime: str = ""
+    local_datetime: str = ""
+    timezone: str = "Asia/Ho_Chi_Minh"
 
     def to_formatter_dict(self) -> dict[str, Any]:
         return {
             "title": self.title,
             "weekday": self.weekday,
             "display_time": self.display_time,
+            "local_time": self.display_time,
             "date": self.date,
+            "local_date": self.date,
             "category": self.category,
             "subtitle": self.subtitle,
             "league": self.subtitle,
             "emoji": self.emoji,
             "participants": self.participants,
             "lock_id": self.lock_id,
+            "utc_datetime": self.utc_datetime,
+            "local_datetime": self.local_datetime,
+            "timezone": self.timezone,
+            "time_locked": True,
+            "schedule_locked": True,
             "_locked": True,
         }
 
@@ -63,8 +75,8 @@ class LockedEvent:
 def _lock_id_from_event(e: dict[str, Any]) -> str:
     return "|".join(
         (
-            str(e.get("date", "")).strip(),
-            str(e.get("display_time") or e.get("time", "")).strip(),
+            str(e.get("utc_datetime") or e.get("local_date") or e.get("date", "")).strip(),
+            str(e.get("local_time") or e.get("display_time") or e.get("time", "")).strip(),
             str(e.get("title", "")).strip().lower()[:100],
         )
     )
@@ -116,19 +128,23 @@ def lock_events_for_formatter(
         if not title:
             continue
 
+        sched_tm = str(e.get("local_time") or e.get("time", "")).strip()
+        sched_wd = str(e.get("local_weekday") or e.get("weekday", "")).strip()
+        sched_date = str(e.get("local_date") or e.get("date", "")).strip()
         locked.append(
             LockedEvent(
                 title=title,
-                weekday=str(e.get("weekday", "")).strip(),
-                display_time=str(
-                    e.get("display_time") or e.get("time_display") or e.get("time", "")
-                ).strip(),
-                date=str(e.get("date", "")).strip(),
+                weekday=sched_wd,
+                display_time=sched_tm,
+                date=sched_date,
                 category=str(e.get("category", "")).strip(),
                 subtitle=str(e.get("subtitle", e.get("league", ""))).strip(),
                 emoji=str(e.get("emoji", "🏟")).strip() or "🏟",
                 participants=str(e.get("participants", "")).strip() or title,
                 lock_id=_lock_id_from_event(e),
+                utc_datetime=str(e.get("utc_datetime", "")).strip(),
+                local_datetime=str(e.get("local_datetime", "")).strip(),
+                timezone=str(e.get("timezone", "Asia/Ho_Chi_Minh")).strip(),
             )
         )
 
@@ -214,8 +230,8 @@ def format_locked_weekly_afisha(
             continue
 
         em = str(e.get("emoji", "🏟")).strip()
-        wd = str(e.get("weekday", "")).strip()
-        tm = str(e.get("display_time", "")).strip()
+        wd = str(e.get("local_weekday") or e.get("weekday", "")).strip()
+        tm = str(e.get("local_time") or e.get("display_time", "")).strip()
         title = str(e.get("title", "")).strip()
         sub = str(e.get("subtitle", "")).strip()
 

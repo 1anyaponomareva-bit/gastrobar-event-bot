@@ -34,7 +34,6 @@ from database import (
     upsert_draft_asset,
 )
 from event_radar import get_event_radar_now24
-from event_verifier import verify_event
 from image_finder import find_event_image
 from weekly_events_cache import (
     get_weekly_events_cache,
@@ -71,19 +70,14 @@ class DailyBuildResult:
 
 
 def normalize_event_for_daily(e: dict[str, Any]) -> dict[str, Any]:
+    from locked_time import schedule_dict_for_formatters
+
     out = dict(e)
+    out.update(schedule_dict_for_formatters(out))
     out["title"] = str(out.get("title", "")).strip() or "Событие"
-    out["display_time"] = str(
-        out.get("display_time")
-        or out.get("local_time")
-        or out.get("time_display")
-        or out.get("time", "")
-    ).strip()
     out["emoji"] = str(out.get("emoji", "🏟")).strip() or "🏟"
     out["subtitle"] = str(out.get("subtitle", out.get("league", ""))).strip()
     out.setdefault("daily_timing_phrase", "скоро")
-    out.setdefault("date", str(out.get("local_date") or out.get("date", "")))
-    out.setdefault("weekday", str(out.get("local_weekday") or out.get("weekday", "")))
     return out
 
 
@@ -156,65 +150,39 @@ async def resolve_daily_events(
 async def verify_events_for_daily(
     events: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], bool, bool]:
-    from event_time import apply_event_datetime, has_locked_datetime, reconcile_event_datetime
+    """
+    Daily NEVER recomputes or re-verifies time. Weekly cache schedule is immutable.
+    """
+    from locked_time import assert_no_time_drift, has_locked_schedule, lock_event_schedule
 
     if not events:
         return [], False, False
 
     verified: list[dict[str, Any]] = []
-    time_ok = True
     for e in events:
         title = e.get("title")
         cached = dict(e)
-        if has_locked_datetime(cached):
-            locked = apply_event_datetime(cached)
-            if locked:
-                verified.append(normalize_event_for_daily(locked))
-                log.info(
-                    "daily verification: title=%r using weekly locked time utc=%s local=%s",
-                    title,
-                    locked.get("utc_datetime"),
-                    locked.get("local_datetime"),
-                )
+        if not has_locked_schedule(cached):
+            locked = lock_event_schedule(cached, phase="daily_backfill")
+            if not locked:
+                log.warning("daily: no locked schedule for %r — skipped", title)
                 continue
-        try:
-            r = await verify_event(e)
-        except Exception:
-            log.exception("daily verify failed for %r", title)
-            r = None
-        if r:
-            r = reconcile_event_datetime(cached, r)
-        if r and str(r.get("confidence", "medium")).lower() in ("high", "medium"):
-            verified.append(normalize_event_for_daily(r))
-            log.info(
-                "daily verification result: title=%r confidence=%s via=%s utc=%s",
-                title,
-                r.get("confidence"),
-                r.get("verified_via"),
-                r.get("utc_datetime"),
-            )
-        elif r:
-            r = normalize_event_for_daily(r)
-            r["confidence"] = "medium"
-            verified.append(r)
-            log.info("daily verification result: title=%r confidence=medium (soft)", title)
-        else:
-            fallback = apply_event_datetime(cached) or cached
-            fallback = normalize_event_for_daily(fallback)
-            fallback["confidence"] = "medium"
-            fallback["verification_reason"] = "daily_pass_through"
-            verified.append(fallback)
-            time_ok = False
-            log.warning("daily verification pass-through: title=%r", title)
+            cached = locked
 
-    if not verified:
-        verified = [normalize_event_for_daily(e) for e in events]
-        time_ok = False
+        out = assert_no_time_drift(cached, cached, context="daily")
+        out = normalize_event_for_daily(out)
+        verified.append(out)
+        log.info(
+            "daily schedule locked: title=%r utc=%s local=%s %s %s",
+            title,
+            out.get("utc_datetime"),
+            out.get("local_datetime"),
+            out.get("local_weekday"),
+            out.get("local_time"),
+        )
 
-    verified_ok = all(
-        str(v.get("confidence", "medium")).lower() in ("high", "medium")
-        for v in verified
-    )
+    verified_ok = bool(verified) and all(has_locked_schedule(v) for v in verified)
+    time_ok = verified_ok
     return verified, verified_ok, time_ok
 
 

@@ -8,11 +8,9 @@ from config import TIMEZONE
 
 
 def format_event_schedule_line(e: dict[str, Any]) -> str:
-    """ВТ 07:30 — для поста и служебного сообщения."""
-    wd = str(e.get("weekday", "")).strip().upper()
-    tm = str(
-        e.get("display_time") or e.get("time_display") or e.get("time", "")
-    ).strip()
+    """ВТ 07:30 — для поста и служебного сообщения (locked local time only)."""
+    wd = str(e.get("local_weekday") or e.get("weekday", "")).strip().upper()
+    tm = str(e.get("local_time") or e.get("display_time") or e.get("time", "")).strip()
     if wd and tm:
         return f"{wd} {tm}"
     return tm or wd or "время уточняется"

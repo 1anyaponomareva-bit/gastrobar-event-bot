@@ -32,12 +32,13 @@ def _event_dedupe_key(e: dict[str, Any]) -> tuple[str, str, str]:
 
 def event_to_cache_record(e: dict[str, Any], *, source: str = "weekly_radar") -> dict[str, Any]:
     from event_participants import extract_participants
-    from event_time import apply_event_datetime
+    from locked_time import has_locked_schedule, lock_event_schedule
 
     full = dict(e)
-    applied = apply_event_datetime(full)
-    if applied:
-        full = applied
+    if not has_locked_schedule(full):
+        applied = lock_event_schedule(full, phase="weekly_cache_save")
+        if applied:
+            full = applied
     if "display_time" not in full:
         full["display_time"] = (
             str(full.get("time_display") or full.get("local_time") or full.get("time", "")).strip()
@@ -61,7 +62,7 @@ def event_to_cache_record(e: dict[str, Any], *, source: str = "weekly_radar") ->
 
 
 def record_to_event(record: dict[str, Any]) -> dict[str, Any]:
-    from event_time import apply_event_datetime
+    from locked_time import has_locked_schedule, lock_event_schedule
 
     if isinstance(record.get("_event"), dict):
         ev = dict(record["_event"])
@@ -70,7 +71,9 @@ def record_to_event(record: dict[str, Any]) -> dict[str, Any]:
             ev["utc_datetime"] = record["utc_datetime"]
         if record.get("local_datetime") and not ev.get("local_datetime"):
             ev["local_datetime"] = record["local_datetime"]
-        applied = apply_event_datetime(ev)
+        if has_locked_schedule(ev):
+            return ev
+        applied = lock_event_schedule(ev, phase="weekly_cache_load")
         return applied if applied else ev
     return dict(record)
 

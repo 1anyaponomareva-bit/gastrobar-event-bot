@@ -188,29 +188,31 @@ async def generate_week_post(events: list[dict]) -> str:
 def _generate_daily_event_post_sync(event: dict) -> str:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not set")
+    sched_wd = str(event.get("local_weekday") or event.get("weekday", "")).strip()
+    sched_tm = str(event.get("local_time") or event.get("display_time") or event.get("time", "")).strip()
     safe = {
         k: event.get(k)
         for k in (
             "title",
             "subtitle",
             "league",
-            "date",
-            "weekday",
-            "time",
-            "display_time",
-            "time_display",
             "emoji",
             "daily_timing_phrase",
             "note",
+            "bar_hours_note",
             "ufc_main_note",
             "category",
         )
     }
+    safe["weekday"] = sched_wd
+    safe["local_weekday"] = sched_wd
+    safe["display_time"] = sched_tm
+    safe["local_time"] = sched_tm
+    safe["timezone"] = "Asia/Ho_Chi_Minh"
+    safe["schedule_locked"] = True
     event_json = json.dumps(safe, ensure_ascii=False, indent=2)
     timing = str(event.get("daily_timing_phrase", "скоро")).strip()
-    display_time = str(
-        event.get("display_time") or event.get("time_display") or event.get("time", "")
-    ).strip()
+    display_time = sched_tm
     note = str(event.get("note", "")).strip()
     ufc_note = str(event.get("ufc_main_note", "")).strip()
     em = str(event.get("emoji", "🏟")).strip()
@@ -223,9 +225,9 @@ def _generate_daily_event_post_sync(event: dict) -> str:
 Тон: атмосферный, приглашающий, без канцелярита, без вопросов читателю.
 Длина: 300–700 символов, не больше.
 
-ОБЯЗАТЕЛЬНО укажи дату/время по Vietnam (Asia/Ho_Chi_Minh) отдельной строкой:
-🕒 {event.get("weekday", "")} {display_time}
-(используй weekday и display_time из JSON как есть)
+ОБЯЗАТЕЛЬНО укажи время отдельной строкой ТОЧНО как в JSON (не менять, не пересчитывать):
+🕒 {sched_wd} {display_time}
+ЗАПРЕЩЕНО: менять час, день недели, timezone, UTC, «переводить» время.
 
 Структура (гибко):
 - цепляющий заход с эмодзи {em} и событием ({timing});
