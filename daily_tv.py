@@ -1,151 +1,62 @@
 """
-Ограничение daily / now24 по числу телевизоров в баре.
-События в одном временном окне (пересечение или старт в пределах 2 ч) — максимум GASTROBAR_TV_COUNT.
+Ограничение daily / weekly по числу телевизоров — слоты 90 мин, приоритет Gastrobar.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
-from bar_hours import infer_duration_minutes
 from config import GASTROBAR_TV_COUNT, TIMEZONE
 from daily_display import format_event_schedule_line
-from daily_event import _daily_priority_score, event_start_datetime_vn
+from daily_event import event_start_datetime_vn
+from gastrobar_priority import apply_audience_slot_selection
 from zoneinfo import ZoneInfo
 
 log = logging.getLogger(__name__)
 
 TZ = ZoneInfo(TIMEZONE)
-CLUSTER_START_GAP_HOURS = 2
+
+# Совместимость
+CLUSTER_START_GAP_HOURS = 1.5
+CONFLICT_WINDOW_MINUTES = 90
 
 
-def event_end_datetime_vn(e: dict[str, Any]) -> datetime | None:
+def event_end_datetime_vn(e: dict[str, Any]):
+    from datetime import timedelta
+
+    from bar_hours import infer_duration_minutes
+
     start = event_start_datetime_vn(e)
     if not start:
         return None
     return start + timedelta(minutes=infer_duration_minutes(e))
 
 
-def events_share_time_window(
-    a: dict[str, Any],
-    b: dict[str, Any],
-    *,
-    gap_hours: float = CLUSTER_START_GAP_HOURS,
-) -> bool:
-    """Пересечение по времени или старт в пределах gap_hours друг от друга."""
-    sa, ea = event_start_datetime_vn(a), event_end_datetime_vn(a)
-    sb, eb = event_start_datetime_vn(b), event_end_datetime_vn(b)
-    if not sa or not sb:
-        return False
+def events_share_time_window(a: dict[str, Any], b: dict[str, Any], **kwargs) -> bool:
+    from gastrobar_priority import events_in_conflict_window
 
-    gap = timedelta(hours=gap_hours)
-    if abs(sa - sb) <= gap:
-        return True
-
-    if ea and eb and sa < eb and sb < ea:
-        return True
-
-    # Старт одного внутри «хвоста» другого (длительность + gap)
-    if ea and sb <= ea + gap:
-        return True
-    if eb and sa <= eb + gap:
-        return True
-    return False
+    return events_in_conflict_window(a, b)
 
 
-def cluster_events_by_time_window(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    if not events:
-        return []
-    if len(events) == 1:
-        return [list(events)]
+def cluster_events_by_time_window(events: list[dict[str, Any]]):
+    from gastrobar_priority import cluster_events_by_conflict_window
 
-    indexed = list(enumerate(events))
-    parent = list(range(len(events)))
-
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def union(i: int, j: int) -> None:
-        ri, rj = find(i), find(j)
-        if ri != rj:
-            parent[ri] = rj
-
-    for i in range(len(events)):
-        for j in range(i + 1, len(events)):
-            if events_share_time_window(events[i], events[j]):
-                union(i, j)
-
-    buckets: dict[int, list[dict[str, Any]]] = {}
-    for i, e in indexed:
-        root = find(i)
-        buckets.setdefault(root, []).append(e)
-
-    clusters = list(buckets.values())
-    clusters.sort(
-        key=lambda cluster: min(
-            event_start_datetime_vn(e) or datetime.max.replace(tzinfo=TZ)
-            for e in cluster
-        )
-    )
-    return clusters
+    return cluster_events_by_conflict_window(events)
 
 
 def apply_tv_limit_for_digest(
     events: list[dict[str, Any]],
     *,
     tv_count: int | None = None,
+    log_prefix: str = "daily_tv",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """
-    Для daily / now24: в каждом временном кластере оставить не больше tv_count событий
-    (лучшие по _daily_priority_score). Остальные — skipped_due_to_tv_limit.
-    """
-    if not events:
-        return [], []
-
-    limit = max(1, int(tv_count if tv_count is not None else GASTROBAR_TV_COUNT))
-    if len(events) <= limit:
-        return list(events), []
-
-    clusters = cluster_events_by_time_window(events)
-    selected: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-
-    for cluster in clusters:
-        if len(cluster) <= limit:
-            selected.extend(cluster)
-            continue
-
-        ranked = sorted(
-            cluster,
-            key=lambda e: (
-                _daily_priority_score(e),
-                event_start_datetime_vn(e) or datetime.max.replace(tzinfo=TZ),
-            ),
-        )
-        keep = ranked[:limit]
-        drop = ranked[limit:]
-        selected.extend(keep)
-        skipped.extend(drop)
-        for e in drop:
-            log.info(
-                "skipped_due_to_tv_limit: title=%r cluster_size=%s tv_count=%s",
-                e.get("title"),
-                len(cluster),
-                limit,
-            )
-
-    selected.sort(
-        key=lambda e: (
-            _daily_priority_score(e),
-            event_start_datetime_vn(e) or datetime.max.replace(tzinfo=TZ),
-        )
+    return apply_audience_slot_selection(
+        events,
+        tv_count=tv_count,
+        log_prefix=log_prefix,
     )
-    return selected, skipped
 
 
 def events_are_simultaneous(a: dict[str, Any], b: dict[str, Any]) -> bool:
@@ -157,7 +68,6 @@ def events_are_simultaneous(a: dict[str, Any], b: dict[str, Any]) -> bool:
 
 
 def format_dual_screen_daily_post(events: list[dict[str, Any]]) -> str:
-    """Шаблон поста дня на два экрана (2 ТВ)."""
     if len(events) != 2:
         raise ValueError("format_dual_screen_daily_post expects exactly 2 events")
 
@@ -184,14 +94,7 @@ def format_dual_screen_daily_post(events: list[dict[str, Any]]) -> str:
     ]
     if sub1 and sub1.lower() != title1.lower():
         lines.append(sub1)
-    lines.extend(
-        [
-            "",
-            "На втором:",
-            f"{em2} 🕒 {sched2}",
-            title2,
-        ]
-    )
+    lines.extend(["", "На втором:", f"{em2} 🕒 {sched2}", title2])
     if sub2 and sub2.lower() != title2.lower():
         lines.append(sub2)
     lines.append("")

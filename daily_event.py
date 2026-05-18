@@ -67,47 +67,12 @@ def campaign_post_date(e: dict[str, Any]) -> date | None:
 
 
 def _daily_priority_score(e: dict[str, Any]) -> int:
-    """Меньше = важнее для поста дня (UFC → Eurovision → UCL → …)."""
-    b = bar_event_blob(e)
-    if re.search(r"\bufc\b", b):
-        if "main card" in b or "main event" in b or re.search(
-            r"\bvs\.?\b", str(e.get("title", "")), re.I
-        ):
-            return 1
-    if "eurovision" in b:
-        return 2
-    if "nba" in b and re.search(
-        r"finals|conference\s+final|playoff|game\s*[1-7]", b
-    ):
-        return 3
-    if re.search(
-        r"\bucl\b|champions\s+league|uefa\s+champions|europa\s+league|\buel\b", b
-    ):
-        return 4
-    if re.search(r"formula\s*1|\bf1\b", b) and re.search(
-        r"qualifying|sprint|\brace|grand\s+prix", b
-    ):
-        return 5
-    if "stanley" in b or ("nhl" in b and re.search(r"playoff|final|conference", b)):
-        return 6
-    if any(
-        x in b
-        for x in (
-            "esports",
-            "grand final",
-            "the international",
-            "valorant champions",
-            "lol worlds",
-            "cs2 major",
-        )
-    ):
-        return 7
-    if "wwe" in b or re.search(r"live\s+show|pay.per.view|ppv", b):
-        return 8
-    tier = int(e.get("radar_tier", 50))
-    if tier < 20:
-        return 10 + tier
-    return 99
+    """Меньше = важнее. Совпадает с gastrobar_audience_priority."""
+    from gastrobar_priority import gastrobar_audience_priority
+
+    if e.get("gastrobar_priority") is not None:
+        return int(e["gastrobar_priority"])
+    return gastrobar_audience_priority(e)
 
 
 def is_in_daily_window(e: dict[str, Any], now: datetime | None = None) -> bool:

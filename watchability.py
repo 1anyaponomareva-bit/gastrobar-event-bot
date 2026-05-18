@@ -200,7 +200,7 @@ def _football_watchability(b: str, title: str) -> tuple[int, str]:
         reasons.append("derby")
 
     if re.search(r"champions\s+league|\bucl\b", b):
-        score += 24
+        score += 28
         reasons.append("ucl")
     elif re.search(r"europa\s+league|\buel\b", b):
         score += 18
@@ -221,48 +221,50 @@ def _football_watchability(b: str, title: str) -> tuple[int, str]:
 
 
 def _nba_watchability(b: str, title: str) -> tuple[int, str]:
-    """NBA — высокий приоритет для Gastrobar (выше обычного EPL)."""
-    if re.search(r"nba\s+finals", b) or (
-        re.search(r"\bfinals\b", b) and "conference" not in b and "nba" in b
-    ):
-        return 96, "nba_finals"
-
-    if re.search(
-        r"western\s+conference\s+final|eastern\s+conference\s+final|"
-        r"conference\s+finals|nba\s+conference\s+final",
-        b,
-    ):
-        return 92, "nba_conf_final"
-
-    if re.search(r"conference\s+final", b) and "nba" in b:
-        return 90, "nba_conf_final"
-
-    score = 42
+    """NBA playoffs — важно, но ниже футбола / UFC / F1 / NHL."""
+    score = 38
     reasons: list[str] = []
     teams = _count_tokens(b + " " + title.lower(), NBA_TOP_TEAMS)
 
-    if has_matchup_in_title(title):
-        score += 24
-        reasons.append("matchup")
-    if teams >= 2:
+    if re.search(r"nba\s+finals", b) or (
+        re.search(r"\bfinals\b", b) and "conference" not in b and "nba" in b
+    ):
+        score += 42
+        reasons.append("nba_finals")
+    elif re.search(
+        r"western\s+conference\s+final|eastern\s+conference\s+final|conference\s+finals",
+        b,
+    ):
+        score += 36
+        reasons.append("nba_conf_final")
+    elif re.search(r"conference\s+final", b) and "nba" in b:
+        score += 32
+        reasons.append("nba_conf_final")
+    elif "playoff" in b:
         score += 26
-        reasons.append("top_vs_top")
-    elif teams == 1:
-        score += 12
-        reasons.append("top_team")
-
-    if "playoff" in b:
-        score += 28
         reasons.append("playoffs")
         if re.search(r"game\s*[1-7]|game\s*\d", b):
-            score += 10
+            score += 8
             reasons.append("playoff_game")
+    else:
+        score = 28
+        reasons.append("nba_regular")
 
-    if teams == 0 and "playoff" not in b:
-        score -= 28
+    if has_matchup_in_title(title):
+        score += 12
+        reasons.append("matchup")
+    if teams >= 2:
+        score += 12
+        reasons.append("top_vs_top")
+    elif teams == 1:
+        score += 6
+        reasons.append("top_team")
+
+    if teams == 0 and "playoff" not in b and "final" not in b:
+        score -= 20
         reasons.append("weak_regular")
 
-    return min(100, max(0, score)), "+".join(reasons) or "nba"
+    return min(80, max(0, score)), "+".join(reasons) or "nba"
 
 
 def _nhl_watchability(b: str, title: str) -> tuple[int, str]:
@@ -410,15 +412,19 @@ def compute_watchability_score(e: dict[str, Any]) -> tuple[int, str, str]:
 
 
 def enrich_watchability(e: dict[str, Any]) -> dict[str, Any]:
+    from gastrobar_priority import enrich_gastrobar_priority
+
     out = dict(e)
     score, etype, reason = compute_watchability_score(out)
     out["watchability_score"] = score
     out["editorial_type"] = etype
     out["watchability_reason"] = reason
+    out = enrich_gastrobar_priority(out)
     log.info(
-        "watchability: title=%r score=%s type=%s reason=%s",
+        "watchability: title=%r score=%s gastrobar_priority=%s type=%s reason=%s",
         out.get("title"),
         score,
+        out.get("gastrobar_priority"),
         etype,
         reason,
     )

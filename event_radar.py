@@ -856,8 +856,9 @@ def _prepare_for_afisha_selection(e: dict[str, Any]) -> dict[str, Any]:
     return enrich_watchability(e)
 
 
-def _watchability_sort_key(e: dict[str, Any]) -> tuple[int, int, str, str]:
+def _watchability_sort_key(e: dict[str, Any]) -> tuple[int, int, int, str, str]:
     return (
+        int(e.get("gastrobar_priority", 99)),
         -int(e.get("watchability_score", 0)),
         int(e.get("radar_tier", 99)),
         *_confidence_sort_key(e)[1:],
@@ -875,6 +876,7 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
         if str(e.get("confidence", "medium")).lower() in ("high", "medium")
     ]
     from event_participants import filter_events_by_participants
+    from gastrobar_priority import apply_audience_slot_selection, enrich_gastrobar_priority
 
     prepared = [_prepare_for_afisha_selection(dict(e)) for e in verified]
     prepared = filter_events_by_participants(prepared, log_prefix="weekly_select")
@@ -889,40 +891,56 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
         for e in prepared
         if int(e.get("watchability_score", 0)) >= RADAR_MIN_WATCHABILITY
     ]
+    for e in eligible:
+        enrich_gastrobar_priority(e)
+
     eligible.sort(key=_watchability_sort_key)
 
-    out: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
+    deduped: list[dict[str, Any]] = []
     for e in eligible:
-        if len(out) >= RADAR_WEEKLY_MAX:
-            break
         k = _event_dedupe_key(e)
         if k in seen:
             continue
         seen.add(k)
-        out.append(e)
+        deduped.append(e)
+
+    slot_selected, slot_skipped = apply_audience_slot_selection(
+        deduped,
+        log_prefix="weekly_slot",
+    )
+
+    out = slot_selected[:RADAR_WEEKLY_MAX]
+    for e in out:
         log.info(
-            "weekly selected event: title=%r watchability=%s type=%s",
+            "weekly selected event: title=%r watchability=%s gastrobar_priority=%s type=%s",
             e.get("title"),
             e.get("watchability_score"),
+            e.get("gastrobar_priority"),
             e.get("editorial_type"),
         )
 
-    for e in prepared:
-        if e in out:
+    for e in slot_skipped:
+        log.info(
+            "weekly skipped event: title=%r reason=slot_or_cap watchability=%s priority=%s",
+            e.get("title"),
+            e.get("watchability_score"),
+            e.get("gastrobar_priority"),
+        )
+    for e in deduped:
+        if e in out or e in slot_skipped:
             continue
-        score = int(e.get("watchability_score", 0))
-        if score < RADAR_MIN_WATCHABILITY:
+        if int(e.get("watchability_score", 0)) < RADAR_MIN_WATCHABILITY:
             log.info(
                 "weekly skipped event: title=%r reason=low_watchability score=%s",
                 e.get("title"),
-                score,
+                e.get("watchability_score"),
             )
-        elif len(out) >= RADAR_WEEKLY_MAX:
+        elif e not in slot_selected:
             log.info(
-                "weekly skipped event: title=%r reason=weekly_cap score=%s",
+                "weekly skipped event: title=%r reason=weekly_cap priority=%s",
                 e.get("title"),
-                score,
+                e.get("gastrobar_priority"),
             )
 
     out.sort(key=sort_key_verified)
