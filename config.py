@@ -22,12 +22,10 @@ GEMINI_MODEL: str = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
 
 DATABASE_PATH: str = os.getenv("DATABASE_PATH", "gastrobar_bot.sqlite3").strip()
 
-# local — bot.lock на диске; railway — один инстанс на платформе, без lock-файла
-_RUN_MODE_RAW = os.getenv("RUN_MODE", "").strip().lower()
-if _RUN_MODE_RAW in ("railway", "local"):
-    RUN_MODE: str = _RUN_MODE_RAW
-elif os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
-    RUN_MODE = "railway"
+# По умолчанию local (разработка на Windows). Railway только при RUN_MODE=railway.
+_RUN_MODE_RAW = os.getenv("RUN_MODE", "local").strip().lower()
+if _RUN_MODE_RAW == "railway":
+    RUN_MODE: str = "railway"
 else:
     RUN_MODE = "local"
 
@@ -39,6 +37,10 @@ EXPECTED_BOT_USERNAME: str = (
 
 def is_railway_run() -> bool:
     return RUN_MODE == "railway"
+
+
+def is_local_run() -> bool:
+    return RUN_MODE == "local"
 
 
 BAR_OPEN_TIME: str = (os.getenv("BAR_OPEN_TIME") or "08:00").strip()

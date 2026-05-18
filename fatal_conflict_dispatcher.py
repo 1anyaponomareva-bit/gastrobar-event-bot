@@ -1,6 +1,6 @@
 """
 Dispatcher, который не крутит бесконечный backoff при TelegramConflictError:
-другой клиент уже держит getUpdates — выходим сразу (fail-fast для Railway).
+другой клиент уже держит getUpdates — выходим сразу (fail-fast, без бесконечного retry).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 def _exit_on_conflict(context: str) -> None:
     loggers.dispatcher.error(
         "%s: TelegramConflictError — другой клиент уже вызывает getUpdates "
-        "(второй Railway deployment, локальный polling или webhook). "
+        "(второй экземпляр main.py, webhook или другой deployment). "
         "Процесс завершается без retry.",
         context,
     )

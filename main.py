@@ -32,7 +32,6 @@ from daily_event_posts import (
     user_error_message,
 )
 from api_checks import check_gemini, check_sports_api
-from bot_instance_lock import release_bot_lock, try_acquire_bot_lock
 import time
 
 from bot_typing import long_operation_typing, show_typing
@@ -42,11 +41,10 @@ from config import (
     EXPECTED_BOT_USERNAME,
     GASTROBAR_GROUP_ID,
     GEMINI_API_KEY,
-    RUN_MODE,
     TELEGRAM_BOT_TOKEN,
-    is_railway_run,
+    is_local_run,
 )
-from gemini_client import effective_gemini_model, run_gemini_test
+from gemini_client import run_gemini_test
 from database import (
     get_draft,
     get_draft_asset,
@@ -63,7 +61,7 @@ from keyboards import (
     radar_now24_result_kb,
     radar_week_result_kb,
 )
-from scheduler import setup_jobs, shutdown_scheduler, start_scheduler
+from scheduler import shutdown_scheduler
 from event_radar import (
     format_radar_now24_message,
     format_radar_week_message,
@@ -107,15 +105,20 @@ def _ru_selected_main_line(n: int) -> str:
 
 
 def _fail_conflict(context: str) -> None:
+    hint = (
+        "Остановите другой экземпляр main.py (bot.lock) или второй deployment."
+        if is_local_run()
+        else "Проверьте TELEGRAM_BOT_TOKEN и единственный deployment."
+    )
     logger.error(
-        "%s: TelegramConflictError — токен уже занят другим polling/webhook. "
-        "Проверьте TELEGRAM_BOT_TOKEN на Railway (должен быть @%s, не SpiceSpace), "
-        "остановите локальный main.py и второй deployment.",
+        "%s: TelegramConflictError — токен уже занят другим polling/webhook. %s "
+        "Ожидается @%s.",
         context,
+        hint,
         EXPECTED_BOT_USERNAME or "?",
     )
     print(
-        "TelegramConflictError: stop duplicate polling or fix TELEGRAM_BOT_TOKEN on Railway.",
+        "TelegramConflictError: only one polling client allowed. " + hint,
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -167,14 +170,19 @@ def _assert_expected_bot_username(username: str | None) -> None:
     if got == want:
         logger.info("Bot username matches EXPECTED_BOT_USERNAME=@%s", want)
         return
+    fix = (
+        "Проверьте TELEGRAM_BOT_TOKEN в .env (токен Gastrobar из BotFather)."
+        if is_local_run()
+        else "Замените TELEGRAM_BOT_TOKEN в Variables на токен Gastrobar."
+    )
     logger.error(
-        "Wrong bot token: running @%s but EXPECTED_BOT_USERNAME=@%s. "
-        "На Railway в Variables замените TELEGRAM_BOT_TOKEN на токен Gastrobar из BotFather.",
+        "Wrong bot token: running @%s but EXPECTED_BOT_USERNAME=@%s. %s",
         username,
         want,
+        fix,
     )
     print(
-        f"Wrong TELEGRAM_BOT_TOKEN: @{username} != @{want}. Fix Railway Variables.",
+        f"Wrong TELEGRAM_BOT_TOKEN: @{username} != @{want}. {fix}",
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -731,27 +739,17 @@ async def draft_cancel(callback: CallbackQuery) -> None:
 
 
 async def main() -> None:
-    import os
+    from startup import (
+        log_startup_banner,
+        run_polling,
+        setup_scheduler_if_admin,
+        validate_required_config,
+    )
 
-    log.info("Starting bot...")
-    log.info("RUN_MODE=%s", RUN_MODE)
-    if is_railway_run():
-        log.info(
-            "Railway env: RAILWAY_ENVIRONMENT=%r RAILWAY_SERVICE_NAME=%r",
-            os.getenv("RAILWAY_ENVIRONMENT"),
-            os.getenv("RAILWAY_SERVICE_NAME"),
-        )
+    log.info("Starting Gastrobar bot...")
+    log_startup_banner()
+    validate_required_config()
     log.info("aiogram version: %s", getattr(aiogram, "__version__", "unknown"))
-
-    log.info("Token loaded: %s", "yes" if TELEGRAM_BOT_TOKEN else "no")
-    log.info("GEMINI_API_KEY loaded: %s", "yes" if GEMINI_API_KEY else "no")
-    log.info("GEMINI_MODEL: %s", effective_gemini_model())
-    if not GEMINI_API_KEY:
-        log.warning(
-            "GEMINI_API_KEY пуст в .env — команда /events (Event Radar) не заработает"
-        )
-    if not TELEGRAM_BOT_TOKEN:
-        raise SystemExit("TELEGRAM_BOT_TOKEN is missing")
 
     await init_db()
     from weekly_events_cache import load_weekly_events_cache
@@ -770,38 +768,34 @@ async def main() -> None:
 
         dp = FatalConflictDispatcher()
         dp.include_router(router)
-        logger.info("/events handler registered (алиас /week без меню) and router included")
-        if ADMIN_ID:
-            setup_jobs(bot)
-            start_scheduler()
-            log.info("Scheduler started for ADMIN_ID=%s", ADMIN_ID)
-        else:
-            log.warning("ADMIN_ID not set — scheduler disabled")
-        log.info("Polling started (single instance, fail-fast on conflict)")
+        logger.info(
+            "Handlers ready: /events /daily /check (router included)"
+        )
+        setup_scheduler_if_admin(bot)
         try:
-            await dp.start_polling(bot)
+            await run_polling(dp, bot)
         except TelegramConflictError:
             _fail_conflict("polling")
-        finally:
-            shutdown_scheduler()
     finally:
+        shutdown_scheduler()
         await bot.session.close()
 
 
 if __name__ == "__main__":
-    _lock_path = Path(__file__).resolve().parent / "bot.lock"
-    if is_railway_run():
-        logger.info("RUN_MODE=railway — bot.lock disabled (Railway must run one replica)")
-    elif not try_acquire_bot_lock(_lock_path, logger):
+    from startup import acquire_instance_lock, release_instance_lock
+
+    if not acquire_instance_lock():
         sys.exit(1)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt, shutting down")
+        logger.info("KeyboardInterrupt — graceful shutdown")
     except SystemExit:
         raise
     except TelegramConflictError:
         _fail_conflict("main")
+    except Exception:
+        logger.exception("Fatal error in main")
+        sys.exit(1)
     finally:
-        if not is_railway_run():
-            release_bot_lock(_lock_path, logger)
+        release_instance_lock()
