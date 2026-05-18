@@ -25,6 +25,7 @@ from config import (
     GEMINI_API_KEY,
     RADAR_MIN_WATCHABILITY,
     RADAR_WEEKLY_MAX,
+    RADAR_WEEKLY_TARGET_MIN,
     SPORTS_API_KEY,
 )
 from gemini_client import effective_gemini_model, generate_radar_content_sync, log_gemini_error
@@ -45,7 +46,7 @@ log = logging.getLogger(__name__)
 # Совместимость: старый лимит 6 → теперь до RADAR_WEEKLY_MAX (по умолчанию 15)
 RADAR_MAX_ITEMS = RADAR_WEEKLY_MAX
 # Сколько кандидатов запросить у Gemini до verify.
-RADAR_PER_SEARCH_MAX = 8
+RADAR_PER_SEARCH_MAX = 12
 RADAR_TIER_LOW = 20
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -299,6 +300,8 @@ CRITICAL TIME RULES:
 - If official source_timezone is unknown, set source_timezone to "" (empty string) — do not guess UTC.
 - For Eurovision use Europe/Zurich (or host city IANA). For UFC US cards use America/New_York or America/Los_Angeles.
 - For F1 use the circuit's local IANA zone (e.g. America/Toronto for Canada GP).
+- For Premier League / EPL use Europe/London. For UCL/UEL in UK use Europe/London, else Europe/Paris.
+- For NBA use America/New_York unless West Coast teams (America/Los_Angeles).
 
 Every row MUST have credible date AND time (HH:MM) from an official listing — Python discards rows without confirmed time.
 Do NOT return summary rows like "Premier League Final Day" without specific matches — one row per concrete match/session.
@@ -867,8 +870,8 @@ def _watchability_sort_key(e: dict[str, Any]) -> tuple[int, int, int, str, str]:
 
 def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    AI Event Editor: отбор по watchability_score (до RADAR_WEEKLY_MAX).
-    Не только финалы — топ-матчи, дерби, F1-уикенд целиком, плей-офф и регулярка топ-команд.
+    Weekly афиша: watchability + major events (medium OK).
+    TV slot cap НЕ применяется — параллельные матчи группируются при отображении (EPL matchday).
     """
     verified = [
         e
@@ -876,7 +879,7 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
         if str(e.get("confidence", "medium")).lower() in ("high", "medium")
     ]
     from event_participants import filter_events_by_participants
-    from gastrobar_priority import apply_audience_slot_selection, enrich_gastrobar_priority
+    from watchability import is_major_weekly_event, min_watchability_for_event
 
     prepared = [_prepare_for_afisha_selection(dict(e)) for e in verified]
     prepared = filter_events_by_participants(prepared, log_prefix="weekly_select")
@@ -886,13 +889,28 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
     prepared = [e for e in prepared if has_confirmed_vn_time(e)]
     log.info("weekly events found after prepare+time: %s", len(prepared))
 
-    eligible = [
-        e
-        for e in prepared
-        if int(e.get("watchability_score", 0)) >= RADAR_MIN_WATCHABILITY
-    ]
-    for e in eligible:
-        enrich_gastrobar_priority(e)
+    eligible: list[dict[str, Any]] = []
+    for e in prepared:
+        floor = min_watchability_for_event(e, default_min=RADAR_MIN_WATCHABILITY)
+        score = int(e.get("watchability_score", 0))
+        if score >= floor:
+            eligible.append(e)
+        elif is_major_weekly_event(e) and score >= max(32, floor - 6):
+            log.info(
+                "weekly major event below floor but kept: title=%r score=%s floor=%s",
+                e.get("title"),
+                score,
+                floor,
+            )
+            eligible.append(e)
+        else:
+            log.info(
+                "weekly skipped event: title=%r reason=low_watchability score=%s floor=%s major=%s",
+                e.get("title"),
+                score,
+                floor,
+                is_major_weekly_event(e),
+            )
 
     eligible.sort(key=_watchability_sort_key)
 
@@ -905,50 +923,52 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
         seen.add(k)
         deduped.append(e)
 
-    slot_selected, slot_skipped = apply_audience_slot_selection(
-        deduped,
-        log_prefix="weekly_slot",
-    )
+    # Weekly: no 2-TV slot pruning — show full shortlist (grouping handles EPL blocks).
+    out = deduped[:RADAR_WEEKLY_MAX]
 
-    out = slot_selected[:RADAR_WEEKLY_MAX]
-    for e in out:
-        log.info(
-            "weekly selected event: title=%r watchability=%s gastrobar_priority=%s type=%s",
-            e.get("title"),
-            e.get("watchability_score"),
-            e.get("gastrobar_priority"),
-            e.get("editorial_type"),
-        )
-
-    for e in slot_skipped:
-        log.info(
-            "weekly skipped event: title=%r reason=slot_or_cap watchability=%s priority=%s",
-            e.get("title"),
-            e.get("watchability_score"),
-            e.get("gastrobar_priority"),
-        )
-    for e in deduped:
-        if e in out or e in slot_skipped:
-            continue
-        if int(e.get("watchability_score", 0)) < RADAR_MIN_WATCHABILITY:
+    if len(out) < RADAR_WEEKLY_TARGET_MIN:
+        in_out = {id(x) for x in out}
+        for e in sorted(prepared, key=_watchability_sort_key):
+            if id(e) in in_out:
+                continue
+            if not is_major_weekly_event(e):
+                continue
+            out.append(e)
+            in_out.add(id(e))
             log.info(
-                "weekly skipped event: title=%r reason=low_watchability score=%s",
+                "weekly backfill major: title=%r watchability=%s",
                 e.get("title"),
                 e.get("watchability_score"),
             )
-        elif e not in slot_selected:
-            log.info(
-                "weekly skipped event: title=%r reason=weekly_cap priority=%s",
-                e.get("title"),
-                e.get("gastrobar_priority"),
-            )
+            if len(out) >= RADAR_WEEKLY_TARGET_MIN:
+                break
+
+    for e in out:
+        log.info(
+            "weekly selected event: title=%r watchability=%s confidence=%s "
+            "gastrobar_priority=%s type=%s major=%s",
+            e.get("title"),
+            e.get("watchability_score"),
+            e.get("confidence"),
+            e.get("gastrobar_priority"),
+            e.get("editorial_type"),
+            is_major_weekly_event(e),
+        )
+
+    for e in deduped[RADAR_WEEKLY_MAX:]:
+        log.info(
+            "weekly skipped event: title=%r reason=weekly_cap watchability=%s",
+            e.get("title"),
+            e.get("watchability_score"),
+        )
 
     out.sort(key=sort_key_verified)
     log.info(
-        "weekly radar selection: eligible=%s selected=%s scores=%s",
+        "weekly radar selection: prepared=%s eligible=%s selected=%s target_min=%s",
+        len(prepared),
         len(eligible),
         len(out),
-        [e.get("watchability_score") for e in out],
+        RADAR_WEEKLY_TARGET_MIN,
     )
     return out
 

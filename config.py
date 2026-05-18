@@ -55,7 +55,11 @@ WEEKLY_RADAR_MINUTE: int = int(os.getenv("WEEKLY_RADAR_MINUTE", "40") or "40")
 # Weekly Event Radar: до N событий при высоком watchability
 RADAR_WEEKLY_MAX: int = max(6, int(os.getenv("RADAR_WEEKLY_MAX", "15") or "15"))
 RADAR_MIN_WATCHABILITY: int = max(
-    0, int(os.getenv("RADAR_MIN_WATCHABILITY", "52") or "52")
+    0, int(os.getenv("RADAR_MIN_WATCHABILITY", "42") or "42")
+)
+# Минимум событий в weekly после отбора (backfill major events)
+RADAR_WEEKLY_TARGET_MIN: int = max(
+    6, int(os.getenv("RADAR_WEEKLY_TARGET_MIN", "8") or "8")
 )
 
 # Сколько телевизоров в баре — лимит параллельных эфиров в daily / now24

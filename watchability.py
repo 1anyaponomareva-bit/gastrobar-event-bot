@@ -94,6 +94,68 @@ DERBY_MARKERS = (
     "rivalry",
 )
 
+LONDON_CLUBS = (
+    "arsenal",
+    "tottenham",
+    "spurs",
+    "chelsea",
+    "west ham",
+    "fulham",
+    "crystal palace",
+    "millwall",
+)
+
+
+def is_major_weekly_event(e: dict[str, Any]) -> bool:
+    """
+    Крупные события для weekly: medium confidence допустим, мягче watchability floor.
+    """
+    b = bar_event_blob(e)
+    title = str(e.get("title", "")).strip()
+    et = detect_editorial_type(e)
+
+    if et == "nba" and re.search(
+        r"conference\s+final|nba\s+finals|\bfinals\b|playoff", b, re.I
+    ):
+        return True
+    if et == "nhl" and re.search(r"stanley|conference\s+final|playoff", b, re.I):
+        return True
+    if et == "f1" and re.search(
+        r"qualifying|sprint|\brace\b|grand\s+prix", b, re.I
+    ):
+        return True
+    if et == "ufc" and (
+        has_matchup_in_title(title) or re.search(r"main card|main event", b, re.I)
+    ):
+        return True
+    if et == "football":
+        if any(m in b for m in DERBY_MARKERS):
+            return True
+        if has_matchup_in_title(title) and re.search(
+            r"premier\s+league|champions\s+league|europa\s+league|"
+            r"la\s+liga|serie\s+a|bundesliga|ligue\s+1|\bucl\b|\buel\b",
+            b,
+            re.I,
+        ):
+            return True
+        london_hits = sum(1 for c in LONDON_CLUBS if c in b or c in title.lower())
+        if london_hits >= 2 and has_matchup_in_title(title):
+            return True
+    if et == "eurovision" and re.search(r"grand\s+final|semi", b, re.I):
+        return True
+    if et == "esports" and re.search(
+        r"grand\s+final|major|worlds|international", b, re.I
+    ):
+        return True
+    return False
+
+
+def min_watchability_for_event(e: dict[str, Any], *, default_min: int) -> int:
+    """Порог watchability: ниже для major events (medium confidence OK)."""
+    if is_major_weekly_event(e):
+        return max(36, default_min - 10)
+    return default_min
+
 
 def detect_editorial_type(e: dict[str, Any]) -> str:
     b = bar_event_blob(e)
@@ -198,6 +260,17 @@ def _football_watchability(b: str, title: str) -> tuple[int, str]:
     if any(m in b for m in DERBY_MARKERS):
         score += 22
         reasons.append("derby")
+
+    london_hits = sum(1 for c in LONDON_CLUBS if c in b or c in title.lower())
+    if london_hits >= 2 and has_matchup_in_title(title):
+        score += 18
+        reasons.append("london_derby")
+
+    if re.search(r"final\s+day|matchday\s+\d+|md\d+", b) and re.search(
+        r"premier\s+league", b
+    ):
+        score += 12
+        reasons.append("epl_matchday")
 
     if re.search(r"champions\s+league|\bucl\b", b):
         score += 28
@@ -405,6 +478,8 @@ def compute_watchability_score(e: dict[str, Any]) -> tuple[int, str, str]:
     conf = str(e.get("confidence", "medium")).lower()
     if conf == "high":
         s = min(100, s + 4)
+    elif conf == "medium" and is_major_weekly_event(e):
+        s = min(100, s + 6)
     elif conf == "low":
         s = max(0, s - 15)
 

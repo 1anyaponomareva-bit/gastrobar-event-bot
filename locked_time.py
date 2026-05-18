@@ -189,6 +189,25 @@ def lock_event_schedule(event: dict[str, Any], *, phase: str = "lock") -> dict[s
     else:
         date_s, time_s, src_tz = extract_source_fields_for_conversion(out)
         if not src_tz or not is_acceptable_source_timezone(src_tz, out):
+            from event_time import extract_source_fields, infer_source_timezone
+
+            fd, ft, fz = extract_source_fields(out)
+            if fz and is_acceptable_source_timezone(fz, out):
+                date_s, time_s, src_tz = fd, ft, fz
+            else:
+                inferred = infer_source_timezone(out)
+                if inferred and is_acceptable_source_timezone(inferred, out):
+                    log.info(
+                        "TRUSTED SOURCE TZ INFERENCE: %s for %r",
+                        inferred,
+                        title,
+                    )
+                    src_tz = inferred
+                    if not date_s:
+                        date_s = fd
+                    if not time_s:
+                        time_s = ft
+        if not src_tz or not is_acceptable_source_timezone(src_tz, out):
             log.warning(
                 "lock_event_schedule: missing/invalid SOURCE TIMEZONE title=%r tz=%r",
                 title,

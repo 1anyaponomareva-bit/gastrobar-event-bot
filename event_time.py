@@ -329,6 +329,25 @@ def infer_source_timezone(event: dict[str, Any]) -> str | None:
         if re.search(r"bahrain|saudi|jeddah|qatar", b):
             return "Asia/Bahrain"
         return "Europe/London"
+    if re.search(
+        r"premier\s+league|\bepl\b|la\s+liga|serie\s+a|bundesliga|ligue\s+1",
+        b,
+    ):
+        if re.search(
+            r"london|manchester|liverpool|arsenal|chelsea|tottenham|spurs|"
+            r"everton|west ham|newcastle|brighton|wolves|aston villa",
+            b,
+        ):
+            return "Europe/London"
+        if re.search(r"barcelona|real madrid|atletico|sevilla", b):
+            return "Europe/Madrid"
+        if re.search(r"bayern|dortmund|leipzig|leverkusen", b):
+            return "Europe/Berlin"
+        if re.search(r"inter|milan|juventus|napoli|roma|lazio", b):
+            return "Europe/Rome"
+        if re.search(r"psg|marseille|lyon|monaco", b):
+            return "Europe/Paris"
+        return "Europe/London"
     if re.search(r"champions\s+league|uefa", b):
         if re.search(r"london|manchester|liverpool", b):
             return "Europe/London"
