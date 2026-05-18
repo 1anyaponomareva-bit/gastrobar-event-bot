@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 # Совместимость: старый лимит 6 → теперь до RADAR_WEEKLY_MAX (по умолчанию 15)
 RADAR_MAX_ITEMS = RADAR_WEEKLY_MAX
 # Сколько кандидатов запросить у Gemini до verify.
-RADAR_PER_SEARCH_MAX = 12
+RADAR_PER_SEARCH_MAX = 16
 RADAR_TIER_LOW = 20
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -538,11 +538,10 @@ def _validate_concrete_event(raw: dict[str, Any]) -> dict[str, Any] | None:
             time_s = str(time_raw).strip()
             time_approx = True
     else:
-        log.info(
-            "local_validation: no_time title=%s — пропустим в verify (время уточняется)",
-            raw.get("title"),
-        )
-        time_s = ""
+        from radar_recall import log_radar_rejection
+
+        log_radar_rejection("fetch", "missing_datetime", raw)
+        return None
 
     title = str(raw.get("title", "")).strip()
     if not title or len(title) < 3:
@@ -563,6 +562,18 @@ def _validate_concrete_event(raw: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     category = str(raw.get("category", "EVENT")).strip()[:48] or "EVENT"
+    blob_cat = f"{title} {subtitle}".lower()
+    if category == "EVENT":
+        if re.search(r"premier\s+league|\bepl\b|champions\s+league|\bucl\b|la\s+liga", blob_cat):
+            category = "FOOTBALL"
+        elif re.search(r"\bnba\b", blob_cat):
+            category = "BASKETBALL"
+        elif re.search(r"\bnhl\b|stanley", blob_cat):
+            category = "HOCKEY"
+        elif re.search(r"formula\s*1|\bf1\b|grand\s+prix", blob_cat):
+            category = "F1"
+        elif re.search(r"\bufc\b", blob_cat):
+            category = "UFC"
     why = (
         str(raw.get("why_it_matters", "")).strip()
         or str(raw.get("why", "")).strip()
@@ -789,7 +800,7 @@ def _fetch_radar_multi_search_sharded() -> tuple[list[dict[str, Any]], int, str 
 
 
 def _fetch_radar_combined_once() -> tuple[list[dict[str, Any]], int, str | None]:
-    max_n = min(max(RADAR_PER_SEARCH_MAX * 3, 20), 28)
+    max_n = min(max(RADAR_PER_SEARCH_MAX * 3, 24), 40)
     try:
         prelim, raw_total, fetch_note = _gemini_fetch_with_search_fallback(
             _radar_combined_prompt(max_n),
@@ -886,7 +897,15 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
 
     from event_lock import has_confirmed_vn_time
 
-    prepared = [e for e in prepared if has_confirmed_vn_time(e)]
+    timed: list[dict[str, Any]] = []
+    for e in prepared:
+        if has_confirmed_vn_time(e):
+            timed.append(e)
+        else:
+            from radar_recall import log_radar_rejection
+
+            log_radar_rejection("weekly_select", "missing_datetime", e)
+    prepared = timed
     log.info("weekly events found after prepare+time: %s", len(prepared))
 
     eligible: list[dict[str, Any]] = []
@@ -895,7 +914,7 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
         score = int(e.get("watchability_score", 0))
         if score >= floor:
             eligible.append(e)
-        elif is_major_weekly_event(e) and score >= max(32, floor - 6):
+        elif is_major_weekly_event(e) and score >= max(28, floor - 10):
             log.info(
                 "weekly major event below floor but kept: title=%r score=%s floor=%s",
                 e.get("title"),
@@ -919,6 +938,9 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
     for e in eligible:
         k = _event_dedupe_key(e)
         if k in seen:
+            from radar_recall import log_radar_rejection
+
+            log_radar_rejection("weekly_select", "duplicate", e)
             continue
         seen.add(k)
         deduped.append(e)
@@ -928,17 +950,25 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
 
     if len(out) < RADAR_WEEKLY_TARGET_MIN:
         in_out = {id(x) for x in out}
-        for e in sorted(prepared, key=_watchability_sort_key):
+        backfill_pool = sorted(
+            [e for e in verified if has_confirmed_vn_time(e)],
+            key=_watchability_sort_key,
+        )
+        for e in backfill_pool:
             if id(e) in in_out:
                 continue
             if not is_major_weekly_event(e):
                 continue
-            out.append(e)
+            enriched = _prepare_for_afisha_selection(dict(e))
+            if not has_confirmed_vn_time(enriched):
+                continue
+            out.append(enriched)
             in_out.add(id(e))
             log.info(
-                "weekly backfill major: title=%r watchability=%s",
+                "weekly backfill major: title=%r watchability=%s confidence=%s",
                 e.get("title"),
                 e.get("watchability_score"),
+                e.get("confidence"),
             )
             if len(out) >= RADAR_WEEKLY_TARGET_MIN:
                 break
@@ -1074,39 +1104,69 @@ async def _fetch_radar_pipeline() -> tuple[
 
     results = await asyncio.gather(*[verify_event(e) for e in prelim])
     from locked_time import has_locked_schedule, lock_event_schedule
+    from radar_recall import (
+        is_major_search_candidate,
+        log_radar_rejection,
+        soft_lock_search_candidate,
+    )
 
     verified_all: list[dict[str, Any]] = []
-    verify_dropped = 0
+    stats = {
+        "verify_failed": 0,
+        "low_confidence": 0,
+        "soft_medium_accepted": 0,
+        "api_or_search_ok": 0,
+        "missing_datetime_after": 0,
+        "bar_hours_dropped": 0,
+    }
     for cand, r in zip(prelim, results):
+        if r is None and is_major_search_candidate(cand):
+            r = soft_lock_search_candidate(cand, phase="pipeline_soft_medium")
+            if r:
+                stats["soft_medium_accepted"] += 1
         if r and str(r.get("confidence", "medium")).lower() in ("high", "medium"):
             if not has_locked_schedule(r):
                 r = lock_event_schedule(r, phase="weekly_pipeline") or r
-            verified_all.append(r)
-        else:
-            verify_dropped += 1
-            if r:
-                log.info(
-                    "verify_skipped_low_confidence: title=%r confidence=%s",
-                    r.get("title"),
-                    r.get("confidence"),
-                )
+            if r and has_locked_schedule(r):
+                verified_all.append(r)
+                stats["api_or_search_ok"] += 1
+                if str(r.get("confidence", "")).lower() == "medium":
+                    log.info(
+                        "radar_medium_accepted pipeline: title=%r via=%s",
+                        r.get("title"),
+                        r.get("verified_via"),
+                    )
             else:
-                log.info(
-                    "verify_removed_in_pipeline: title=%r date=%s time=%s",
-                    cand.get("title"),
-                    cand.get("date"),
-                    cand.get("time"),
-                )
+                stats["missing_datetime_after"] += 1
+                log_radar_rejection("pipeline", "missing_datetime_after_lock", cand)
+        elif r:
+            stats["low_confidence"] += 1
+            log_radar_rejection(
+                "pipeline",
+                "low_confidence",
+                cand,
+                extra=f"conf={r.get('confidence')}",
+            )
+        else:
+            stats["verify_failed"] += 1
+            log_radar_rejection("pipeline", "verify_failed", cand)
 
-    if not verified_all and prelim:
-        log.warning(
-            "Event Radar: verify dropped all %s candidates; no unverified pass-through",
-            len(prelim),
-        )
+    log.info(
+        "Event Radar verify summary: prelim=%s kept=%s stats=%s",
+        len(prelim),
+        len(verified_all),
+        stats,
+    )
 
     from event_lock import has_confirmed_vn_time
 
+    before_bar = len(verified_all)
     verified_all = filter_events_for_bar_hours(verified_all)
+    stats["bar_hours_dropped"] = before_bar - len(verified_all)
+    for v in list(verified_all):
+        if not has_confirmed_vn_time(v):
+            stats["missing_datetime_after"] += 1
+            log_radar_rejection("pipeline", "no_confirmed_vn_time", v)
     verified_all = [v for v in verified_all if has_confirmed_vn_time(v)]
     for v in verified_all:
         _prepare_for_afisha_selection(v)

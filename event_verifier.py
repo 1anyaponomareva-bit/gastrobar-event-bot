@@ -564,7 +564,8 @@ async def _match_apisports(event: dict[str, Any], branch: str) -> dict[str, Any]
             if best is None or sc > best[0]:
                 best = (sc, row)
 
-    if not best or best[0] < 0.42:
+    min_score = 0.34 if branch == "football" else 0.38
+    if not best or best[0] < min_score:
         return None
     row = best[1]
     sides = _split_sides(title_cand)
@@ -572,7 +573,7 @@ async def _match_apisports(event: dict[str, Any], branch: str) -> dict[str, Any]
         blob = (row.get("title") or "").lower()
         ok_a = any(w in blob for w in _tokenize(sides[0]))
         ok_b = any(w in blob for w in _tokenize(sides[1]))
-        if not (ok_a and ok_b) and best[0] < 0.58:
+        if not (ok_a and ok_b) and best[0] < 0.52:
             return None
     dt_iso = str(row.get("dt_iso") or "").strip()
     if not dt_iso:
@@ -930,8 +931,13 @@ async def verify_event(event: dict[str, Any]) -> dict[str, Any] | None:
             )
 
         if out is None:
-            _log_verify_removed(title, "could_not_build_event", event)
-            return None
+            from radar_recall import is_major_search_candidate, soft_lock_search_candidate
+
+            if is_major_search_candidate(event):
+                out = soft_lock_search_candidate(event, phase="verify_soft_major")
+            if out is None:
+                _log_verify_removed(title, "could_not_build_event", event)
+                return None
 
         conf = str(out.get("confidence", "medium")).lower()
         if conf not in _SHOW_CONFIDENCE:
@@ -952,6 +958,10 @@ async def verify_event(event: dict[str, Any]) -> dict[str, Any] | None:
         if not out.get("verification_reason"):
             out["verification_reason"] = api_reason or "search_fields_ok"
 
+        if conf == "medium":
+            from radar_recall import log_medium_accepted
+
+            log_medium_accepted(out, via=str(out.get("verified_via", "verify")))
         logger.info(
             "VERIFY RESULT: confidence=%s via=%s title=%r reason=%s",
             out.get("confidence"),

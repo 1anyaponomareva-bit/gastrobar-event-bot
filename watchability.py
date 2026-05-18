@@ -153,7 +153,7 @@ def is_major_weekly_event(e: dict[str, Any]) -> bool:
 def min_watchability_for_event(e: dict[str, Any], *, default_min: int) -> int:
     """Порог watchability: ниже для major events (medium confidence OK)."""
     if is_major_weekly_event(e):
-        return max(36, default_min - 10)
+        return max(28, default_min - 12)
     return default_min
 
 
