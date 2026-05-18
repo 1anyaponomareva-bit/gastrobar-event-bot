@@ -169,25 +169,29 @@ def select_now24_events(
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Сильные события в ближайшие 24 ч; без добивания слабым хвостом."""
+    from event_participants import is_gastrobar_eligible
+    from watchability import enrich_watchability
+
     now = now or _vn_now()
     pool = events or []
     candidates: list[dict[str, Any]] = []
-    from event_participants import is_gastrobar_eligible
 
     for e in pool:
-        if int(e.get("radar_tier", 99)) >= 99:
+        ev = enrich_watchability(dict(e))
+        if int(ev.get("radar_tier", 99)) >= 99 and int(ev.get("watchability_score", 0)) < 52:
             continue
-        if not is_gastrobar_eligible(e):
+        if not is_gastrobar_eligible(ev):
             continue
-        if not is_in_daily_window(e, now):
+        if not is_in_daily_window(ev, now):
             continue
-        candidates.append(enrich_daily_campaign_meta(e, now))
+        candidates.append(enrich_daily_campaign_meta(ev, now))
 
     if not candidates:
         return []
 
     candidates.sort(
         key=lambda x: (
+            -int(x.get("watchability_score", 0)),
             _daily_priority_score(x),
             event_start_datetime_vn(x) or datetime.max.replace(tzinfo=TZ),
         )

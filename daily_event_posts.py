@@ -185,24 +185,33 @@ async def verify_events_for_daily(
 
 
 async def _generate_post_text(post_events: list[dict[str, Any]]) -> str:
-    if len(post_events) == 1:
-        ev = post_events[0]
+    from event_formatter import format_daily_campaign_post, format_daily_post_for_event
+    from watchability import enrich_watchability
+
+    enriched = [enrich_watchability(e) for e in post_events]
+
+    if len(enriched) == 1:
+        ev = enriched[0]
         try:
             post_text = await generate_daily_event_post(ev)
+            if not post_text_includes_schedule(post_text, ev):
+                raise ValueError("missing schedule in gemini post")
+            log.info(
+                "daily post formatter: gemini+editorial type=%s",
+                ev.get("editorial_type"),
+            )
+            return post_text
         except Exception:
-            log.warning("daily: Gemini single post failed, using template")
-            post_text = format_single_daily_post_template(ev)
-        if not post_text_includes_schedule(post_text, ev):
-            log.info("daily: Gemini post missing time, using template")
-            post_text = format_single_daily_post_template(ev)
-        return post_text
+            log.warning(
+                "daily: using editorial formatter type=%s title=%r",
+                ev.get("editorial_type"),
+                ev.get("title"),
+            )
+            return format_daily_post_for_event(ev)
 
-    if len(post_events) == 2:
-        from daily_tv import format_dual_screen_daily_post
-
-        return format_dual_screen_daily_post(post_events)
-
-    return await generate_daily_campaign_post(post_events)
+    editorial = format_daily_campaign_post(enriched)
+    log.info("daily post formatter: editorial_campaign events=%s", len(enriched))
+    return editorial
 
 
 async def build_daily_content_package(
@@ -231,7 +240,9 @@ async def build_daily_content_package(
             return DailyBuildResult(
                 ok=False,
                 error_code="no_events",
-                error_detail="Крупных событий в ближайшие 24 часа нет.",
+                error_detail=(
+                    "Крупных событий для Gastrobar в ближайшие 24 часа не найдено."
+                ),
             )
 
         for e in now24:
@@ -366,7 +377,7 @@ async def build_daily_content_package(
 
 
 _USER_ERROR_RU = {
-    "no_events": "Крупных событий в ближайшие 24 часа нет.",
+    "no_events": "Крупных событий для Gastrobar в ближайшие 24 часа не найдено.",
     "cache_empty": CACHE_EMPTY_MSG,
     "verification_failed": "Ошибка: verification failed",
     "gemini_text_failed": "Ошибка: Gemini text generation failed",

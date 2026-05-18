@@ -1,8 +1,8 @@
 """
-Event Radar — недельное расписание для бара (Gemini Search, несколько узких запросов + verify).
+Event Radar — AI Event Editor для Gastrobar (Gemini Search + watchability score).
 
-Приоритет: UCL / UFC / F1 / Eurovision / плей-офф NBA·NHL / топ-кибер / крупные концерты·премии (см. код).
-Отсекаются сериальные финалы вроде Chicago Med/Fire/P.D. и прочий «TV noise» без международного масштаба.
+Отбор: что реально смотреть в баре (топ-матчи, дерби, F1-уикенд, плей-офф, не только grand finals).
+Отсекаются сериальные финалы Chicago Med/Fire/P.D. и прочий TV noise.
 
 По умолчанию один запрос Gemini+Search на всю неделю (экономия лимита free tier). Несколько шардов —
 только если в .env RADAR_MULTI_SHARD=1 (для платного/высокого лимита).
@@ -21,7 +21,12 @@ from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from bar_hours import filter_events_for_bar_hours, is_f1_excluded_event
-from config import GEMINI_API_KEY, SPORTS_API_KEY
+from config import (
+    GEMINI_API_KEY,
+    RADAR_MIN_WATCHABILITY,
+    RADAR_WEEKLY_MAX,
+    SPORTS_API_KEY,
+)
 from gemini_client import effective_gemini_model, generate_radar_content_sync, log_gemini_error
 
 from event_verifier import (
@@ -37,10 +42,10 @@ from event_verifier import (
 
 log = logging.getLogger(__name__)
 
-RADAR_MAX_ITEMS = 6
-# Сколько кандидатов запросить у Gemini до verify (для разнообразия категорий).
-RADAR_PER_SEARCH_MAX = 4
-# В афишу только события с radar_tier < RADAR_TIER_LOW (без добивания слабым хвостом).
+# Совместимость: старый лимит 6 → теперь до RADAR_WEEKLY_MAX (по умолчанию 15)
+RADAR_MAX_ITEMS = RADAR_WEEKLY_MAX
+# Сколько кандидатов запросить у Gemini до verify.
+RADAR_PER_SEARCH_MAX = 8
 RADAR_TIER_LOW = 20
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -312,13 +317,23 @@ Week window: {week}
 def _radar_combined_prompt(max_n: int) -> str:
     year = date.today().year
     schema = _radar_schema_instructions(max_n)
-    return f"""You compile ONE weekly TV/sports digest for a bar audience.
+    return f"""You are an AI Event Editor for Gastrobar (Nha Trang bar TVs).
+
+Goal: what people will ACTUALLY want to watch at the bar this week — NOT a list of only grand finals.
 
 Use Google Search. Return ONLY one JSON array (max {max_n} objects), no markdown.
-Cover DISTINCT high-draw events scheduled in the week window above — include wherever credible:
-UEFA Champions League / major football fixtures, NBA or NHL playoff games, UFC cards with concrete times,
-Formula 1 sessions, Eurovision Song Contest {year} if it airs this week, tier-1 esports finals,
-major concerts or arena shows.
+
+INCLUDE when credible (with exact teams/fighters and times):
+- Football: UCL, Europa League, Premier League / La Liga / Serie A / Bundesliga TOP matches, derbies, rivalries, important regular season games (e.g. Arsenal vs Liverpool, El Clásico), playoffs AND finals
+- NBA: playoffs, conference finals, finals, rivalry games, important regular season games between top teams
+- NHL: same logic as NBA
+- Formula 1: ALL weekend sessions (Sprint Qualifying, Sprint, Qualifying, Race) — each as separate row
+- UFC: Main Card / title fights / Fight Night with named main bouts only
+- Eurovision {year}: semi-finals and Grand Final
+- Esports: CS2/Valorant/Dota/LoL major finals or grand finals — NOT random qualifiers or "event day"
+- Major live entertainment / trending broadcasts
+
+SKIP: weak regular-season games, vague listings, F1 practice, UFC prelims-only, procedural TV finales.
 
 {schema}
 """
@@ -344,10 +359,10 @@ def _radar_prompts(max_n: int) -> list[tuple[str, str]]:
     return [
         (
             "radar_sports_utc",
-            f"""Search focus: biggest international sports events this week (UTC-friendly listings).
-Suggested web queries: "biggest sports events this week UTC", "Champions League this week fixtures time".
+            f"""Search focus: bar-watchable sports this week — football top leagues, derbies, NBA/NHL (playoffs AND top-team regular season), not only finals.
+Suggested queries: "Premier League this week big matches", "La Liga El Clasico date time", "NBA national TV games this week".
 
-PRIORITY: UEFA Champions League, major international football, NBA Playoffs/Finals, Stanley Cup Playoffs, major boxing.
+Include named team vs team matchups. Skip anonymous cup finals without confirmed teams.
 {common}
 """,
         ),
@@ -770,7 +785,7 @@ def _fetch_radar_multi_search_sharded() -> tuple[list[dict[str, Any]], int, str 
 
 
 def _fetch_radar_combined_once() -> tuple[list[dict[str, Any]], int, str | None]:
-    max_n = min(max(RADAR_PER_SEARCH_MAX * 3, 12), 18)
+    max_n = min(max(RADAR_PER_SEARCH_MAX * 3, 20), 28)
     try:
         prelim, raw_total, fetch_note = _gemini_fetch_with_search_fallback(
             _radar_combined_prompt(max_n),
@@ -822,6 +837,8 @@ def _tier_sort_key(e: dict[str, Any]) -> tuple[int, int, str, str]:
 
 
 def _prepare_for_afisha_selection(e: dict[str, Any]) -> dict[str, Any]:
+    from watchability import enrich_watchability
+
     e = _enrich_ufc_for_afisha(e)
     tier = _bar_tier(e)
     e["radar_tier"] = tier
@@ -835,13 +852,21 @@ def _prepare_for_afisha_selection(e: dict[str, Any]) -> dict[str, Any]:
         e["subtitle"] = "Music / Live show"
         e["league"] = e["subtitle"]
     e["emoji"] = emoji_for_event(e)
-    return e
+    return enrich_watchability(e)
 
 
-def _select_final_radar_events(verified: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _watchability_sort_key(e: dict[str, Any]) -> tuple[int, int, str, str]:
+    return (
+        -int(e.get("watchability_score", 0)),
+        int(e.get("radar_tier", 99)),
+        *_confidence_sort_key(e)[1:],
+    )
+
+
+def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    До RADAR_MAX_ITEMS (6), по radar_tier без добивания слабым хвостом.
-    Приоритет: Eurovision → UFC Main Card → NBA/NHL finals → F1 → UCL/UEL.
+    AI Event Editor: отбор по watchability_score (до RADAR_WEEKLY_MAX).
+    Не только финалы — топ-матчи, дерби, F1-уикенд целиком, плей-офф и регулярка топ-команд.
     """
     verified = [
         e
@@ -852,38 +877,63 @@ def _select_final_radar_events(verified: list[dict[str, Any]]) -> list[dict[str,
 
     prepared = [_prepare_for_afisha_selection(dict(e)) for e in verified]
     prepared = filter_events_by_participants(prepared, log_prefix="weekly_select")
-    eligible = [e for e in prepared if int(e.get("radar_tier", 99)) < RADAR_TIER_LOW]
-    eligible.sort(key=_tier_sort_key)
+
+    log.info("weekly events found after prepare: %s", len(prepared))
+
+    eligible = [
+        e
+        for e in prepared
+        if int(e.get("watchability_score", 0)) >= RADAR_MIN_WATCHABILITY
+    ]
+    eligible.sort(key=_watchability_sort_key)
 
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
     for e in eligible:
-        if len(out) >= RADAR_MAX_ITEMS:
+        if len(out) >= RADAR_WEEKLY_MAX:
             break
         k = _event_dedupe_key(e)
         if k in seen:
             continue
         seen.add(k)
         out.append(e)
+        log.info(
+            "weekly selected event: title=%r watchability=%s type=%s",
+            e.get("title"),
+            e.get("watchability_score"),
+            e.get("editorial_type"),
+        )
 
-    euro_top = [e for e in prepared if _is_eurovision_event(e) and e.get("radar_tier", 99) <= 2]
-    if euro_top:
-        best_e = sorted(euro_top, key=_tier_sort_key)[0]
-        k0 = _event_dedupe_key(best_e)
-        if not any(_event_dedupe_key(x) == k0 for x in out):
-            if len(out) < RADAR_MAX_ITEMS:
-                out.append(best_e)
-            elif out and int(out[-1].get("radar_tier", 99)) >= int(best_e.get("radar_tier", 0)):
-                out[-1] = best_e
+    for e in prepared:
+        if e in out:
+            continue
+        score = int(e.get("watchability_score", 0))
+        if score < RADAR_MIN_WATCHABILITY:
+            log.info(
+                "weekly skipped event: title=%r reason=low_watchability score=%s",
+                e.get("title"),
+                score,
+            )
+        elif len(out) >= RADAR_WEEKLY_MAX:
+            log.info(
+                "weekly skipped event: title=%r reason=weekly_cap score=%s",
+                e.get("title"),
+                score,
+            )
 
     out.sort(key=sort_key_verified)
     log.info(
-        "afisha selection: eligible=%s selected=%s tiers=%s",
+        "weekly radar selection: eligible=%s selected=%s scores=%s",
         len(eligible),
         len(out),
-        [e.get("radar_tier") for e in out],
+        [e.get("watchability_score") for e in out],
     )
-    return out[:RADAR_MAX_ITEMS]
+    return out
+
+
+def _select_final_radar_events(verified: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Алиас для совместимости."""
+    return _select_weekly_radar_events(verified)
 
 
 def _program_item_to_radar_event(item: dict[str, Any]) -> dict[str, Any] | None:

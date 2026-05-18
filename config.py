@@ -47,5 +47,16 @@ TIMEZONE: str = (os.getenv("TIMEZONE") or "Asia/Ho_Chi_Minh").strip()
 
 DAILY_POST_HOUR: int = int(os.getenv("DAILY_POST_HOUR", "11") or "11")
 
+# Авто-афиша недели: четверг 10:40 (Asia/Ho_Chi_Minh)
+WEEKLY_RADAR_DOW: int = int(os.getenv("WEEKLY_RADAR_DOW", "3") or "3")  # 0=Пн … 3=Чт
+WEEKLY_RADAR_HOUR: int = int(os.getenv("WEEKLY_RADAR_HOUR", "10") or "10")
+WEEKLY_RADAR_MINUTE: int = int(os.getenv("WEEKLY_RADAR_MINUTE", "40") or "40")
+
+# Weekly Event Radar: до N событий при высоком watchability
+RADAR_WEEKLY_MAX: int = max(6, int(os.getenv("RADAR_WEEKLY_MAX", "15") or "15"))
+RADAR_MIN_WATCHABILITY: int = max(
+    0, int(os.getenv("RADAR_MIN_WATCHABILITY", "52") or "52")
+)
+
 # Сколько телевизоров в баре — лимит параллельных эфиров в daily / now24
 GASTROBAR_TV_COUNT: int = max(1, int(os.getenv("GASTROBAR_TV_COUNT", "2") or "2"))

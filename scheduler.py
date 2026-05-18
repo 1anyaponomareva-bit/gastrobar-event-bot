@@ -9,8 +9,16 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from zoneinfo import ZoneInfo
 
-from config import ADMIN_ID, DAILY_POST_HOUR, TIMEZONE
+from config import (
+    ADMIN_ID,
+    DAILY_POST_HOUR,
+    TIMEZONE,
+    WEEKLY_RADAR_DOW,
+    WEEKLY_RADAR_HOUR,
+    WEEKLY_RADAR_MINUTE,
+)
 from daily_event_posts import run_scheduled_daily_content
+from weekly_radar_posts import run_scheduled_weekly_radar
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +39,25 @@ def setup_jobs(bot: Bot) -> None:
         DAILY_POST_HOUR,
         TIMEZONE,
         ADMIN_ID,
+    )
+    scheduler.add_job(
+        run_scheduled_weekly_radar,
+        CronTrigger(
+            day_of_week=WEEKLY_RADAR_DOW,
+            hour=WEEKLY_RADAR_HOUR,
+            minute=WEEKLY_RADAR_MINUTE,
+            timezone=TZ,
+        ),
+        args=[bot],
+        id="weekly_radar_auto",
+        replace_existing=True,
+    )
+    log.info(
+        "Scheduled weekly radar: dow=%s %02d:%02d %s",
+        WEEKLY_RADAR_DOW,
+        WEEKLY_RADAR_HOUR,
+        WEEKLY_RADAR_MINUTE,
+        TIMEZONE,
     )
 
 

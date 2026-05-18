@@ -199,6 +199,11 @@ def passes_participant_rules(e: dict[str, Any]) -> tuple[bool, str]:
     if _is_sport_match_event(b, cat):
         if has_matchup_in_title(title):
             return True, "sport_matchup"
+        if re.search(
+            r"\bfinal\b|semi|playoff|derby|champions\s+league|europa\s+league|\bucl\b|\buel\b",
+            b,
+        ):
+            return True, "sport_participants_pending"
         return False, "sport_missing_teams"
 
     if _is_concert_or_show(b):
@@ -227,6 +232,11 @@ def sanitize_event_for_display(e: dict[str, Any]) -> dict[str, Any]:
     participants = extract_participants(out)
     if participants:
         out["participants"] = participants
+    elif reason == "sport_participants_pending":
+        out["participants"] = "участники уточняются"
+        if subtitle and is_vague_participant_text(subtitle):
+            out["subtitle"] = ""
+            out["league"] = ""
     return out
 
 
@@ -251,11 +261,15 @@ def filter_events_by_participants(
 
 
 def is_gastrobar_eligible(e: dict[str, Any]) -> bool:
+    from config import RADAR_MIN_WATCHABILITY
     from event_verifier import gastrobar_hard_reject
 
     if gastrobar_hard_reject(e):
         return False
-    if int(e.get("radar_tier", 99)) >= 99:
+    score = int(e.get("watchability_score", -1))
+    if score >= 0 and score < RADAR_MIN_WATCHABILITY:
+        return False
+    if score < 0 and int(e.get("radar_tier", 99)) >= 99:
         return False
     ok, _ = passes_participant_rules(e)
     return ok
