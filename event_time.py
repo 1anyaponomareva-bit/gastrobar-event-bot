@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -52,8 +52,24 @@ def _normalize_hhmm(t: str) -> str | None:
     return norm
 
 TARGET_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+TARGET_TZ_NAME = "Asia/Ho_Chi_Minh"
 _WD_RU = ("ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Immutable после первой конвертации — weekly/daily читают одни и те же поля.
+_DATETIME_CANONICAL_KEYS = (
+    "utc_datetime",
+    "local_datetime",
+    "local_date",
+    "local_time",
+    "local_weekday",
+    "timezone",
+    "date",
+    "time",
+    "weekday",
+    "display_time",
+    "time_display",
+)
 
 # IANA и распространённые аббревиатуры (не UTC fallback для «неизвестно»).
 _ZONE_ALIASES: dict[str, str] = {
@@ -128,6 +144,250 @@ def extract_source_fields(event: dict[str, Any]) -> tuple[str, str, str]:
     return date_s, time_s, tz
 
 
+def extract_source_fields_for_conversion(event: dict[str, Any]) -> tuple[str, str, str]:
+    """
+    Поля для конвертации: только официальный source, не VN date/time после lock.
+    """
+    odate = str(event.get("original_date", "")).strip()
+    otime = str(event.get("original_time", "")).strip()
+    otz = str(
+        event.get("original_timezone") or event.get("source_timezone") or ""
+    ).strip()
+    if _DATE_RE.match(odate) and otime and otz and is_valid_source_timezone(otz):
+        return odate, otime, otz
+    if event.get("time_locked") or event.get("utc_datetime"):
+        return "", "", ""
+    return extract_source_fields(event)
+
+
+def parse_datetime_iso(value: str) -> datetime | None:
+    s = str(value or "").strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def source_to_utc_datetime(date_s: str, time_s: str, source_timezone: str) -> datetime:
+    """Один шаг: wall-clock в source TZ → aware UTC."""
+    time_norm = _normalize_hhmm(time_s)
+    if not time_norm:
+        raise ValueError(f"bad time: {time_s!r}")
+    zi = resolve_zone(source_timezone)
+    if zi is None:
+        raise ValueError(f"bad timezone: {source_timezone!r}")
+    d = date.fromisoformat(date_s)
+    hh, mm = map(int, time_norm.split(":"))
+    local_dt = datetime.combine(d, dtime(hh, mm), tzinfo=zi)
+    return local_dt.astimezone(timezone.utc)
+
+
+def utc_datetime_to_local_fields(utc_dt: datetime) -> dict[str, str]:
+    """Единственная конвертация UTC → Asia/Ho_Chi_Minh."""
+    utc_aware = utc_dt.astimezone(timezone.utc)
+    local_dt = utc_aware.astimezone(TARGET_TZ)
+    tm = local_dt.strftime("%H:%M")
+    return {
+        "utc_datetime": utc_aware.isoformat(),
+        "local_datetime": local_dt.isoformat(),
+        "local_date": local_dt.date().isoformat(),
+        "local_time": tm,
+        "local_weekday": get_ru_weekday(local_dt),
+        "timezone": TARGET_TZ_NAME,
+        "date": local_dt.date().isoformat(),
+        "time": tm,
+        "weekday": get_ru_weekday(local_dt),
+    }
+
+
+def has_locked_datetime(event: dict[str, Any]) -> bool:
+    return bool(
+        str(event.get("utc_datetime", "")).strip()
+        and str(event.get("local_datetime", "")).strip()
+    )
+
+
+def log_datetime_pipeline(event: dict[str, Any]) -> None:
+    log.info("UTC DATETIME: %s", event.get("utc_datetime"))
+    log.info("LOCAL DATETIME: %s", event.get("local_datetime"))
+    log.info("TIMEZONE USED: %s", TARGET_TZ_NAME)
+
+
+def _is_asian_football_competition(blob: str) -> bool:
+    return bool(
+        re.search(
+            r"afc|asian\s+cup|j[\-\s]?league|k[\-\s]?league|csl|saudi\s+pro|"
+            r"a[\-\s]?league|thai\s+league|vietnam|v[\-\s]?league",
+            blob,
+            re.I,
+        )
+    )
+
+
+def sanity_check_football_vn_time(event: dict[str, Any]) -> None:
+    """EPL/топ-лиги редко стартуют днём по VN; предупреждение о возможной ошибке TZ."""
+    blob = _event_blob(event)
+    cat = str(event.get("category", "")).upper()
+    if "FOOT" not in cat and "SOCCER" not in cat and "EPL" not in cat:
+        if not re.search(
+            r"premier\s+league|champions\s+league|europa\s+league|"
+            r"la\s+liga|serie\s+a|bundesliga|ligue\s+1",
+            blob,
+            re.I,
+        ):
+            return
+    if _is_asian_football_competition(blob):
+        return
+    tm = str(event.get("local_time") or event.get("time", "")).strip().removeprefix("≈")
+    m = _TIME_RE.match(tm)
+    if not m:
+        return
+    hour = int(m.group(1))
+    if 9 <= hour <= 14:
+        log.warning(
+            "TIME SANITY: football %r at %s %s looks like midday VN — "
+            "check source TZ (EPL usually evening/night/early morning). "
+            "utc=%s original=%s %s %s",
+            event.get("title"),
+            event.get("local_weekday"),
+            tm,
+            event.get("utc_datetime"),
+            event.get("original_date"),
+            event.get("original_time"),
+            event.get("original_timezone") or event.get("source_timezone"),
+        )
+
+
+def reconcile_event_datetime(
+    cached: dict[str, Any],
+    fresh: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Weekly cache = source of truth. При расхождении UTC — оставляем кэш.
+    """
+    if fresh is None:
+        return dict(cached)
+    if not has_locked_datetime(cached):
+        return fresh
+    result = dict(fresh)
+    c_utc = str(cached.get("utc_datetime", "")).strip()
+    f_utc = str(fresh.get("utc_datetime", "")).strip()
+    if c_utc and f_utc and c_utc != f_utc:
+        log.error(
+            "DATETIME MISMATCH weekly vs fresh: title=%r cached_utc=%s fresh_utc=%s "
+            "— using weekly cached local time",
+            cached.get("title"),
+            c_utc,
+            f_utc,
+        )
+        for key in _DATETIME_CANONICAL_KEYS:
+            if key in cached and cached.get(key) is not None:
+                result[key] = cached[key]
+        result["time_locked"] = True
+    elif c_utc:
+        for key in _DATETIME_CANONICAL_KEYS:
+            if cached.get(key) is not None:
+                result[key] = cached[key]
+        result["time_locked"] = True
+    return result
+
+
+def get_event_start_vn(event: dict[str, Any]) -> datetime | None:
+    """Aware datetime в Asia/Ho_Chi_Minh из canonical local_datetime."""
+    loc = parse_datetime_iso(str(event.get("local_datetime", "")))
+    if loc is not None:
+        return loc.astimezone(TARGET_TZ)
+    date_s = str(event.get("local_date") or event.get("date", "")).strip()
+    time_s = str(event.get("local_time") or event.get("time", "")).strip()
+    time_s = time_s.removeprefix("≈").strip()
+    if not _DATE_RE.match(date_s):
+        return None
+    norm = _normalize_hhmm(time_s)
+    if not norm:
+        return None
+    try:
+        d = date.fromisoformat(date_s)
+        hh, mm = map(int, norm.split(":"))
+        return datetime.combine(d, dtime(hh, mm), tzinfo=TARGET_TZ)
+    except ValueError:
+        return None
+
+
+def apply_event_datetime(event: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Единый pipeline: source → UTC (once) → VN local fields (once).
+    Повторная конвертация запрещена, если уже есть utc_datetime.
+    """
+    out = dict(event)
+    utc_raw = str(out.get("utc_datetime", "")).strip()
+    if utc_raw:
+        utc_dt = parse_datetime_iso(utc_raw)
+        if utc_dt is None:
+            log.error("bad utc_datetime on locked event: %r", out.get("title"))
+            return None
+        fields = utc_datetime_to_local_fields(utc_dt)
+        out.update(fields)
+        prec = str(out.get("time_precision", "exact")).lower()
+        tm = out["local_time"]
+        out["time_display"] = f"≈{tm}" if prec == "estimated" else tm
+        if not out.get("display_time") or out.get("display_time") == "время уточняется":
+            out["display_time"] = out["time_display"].removeprefix("≈")
+        out["time_locked"] = True
+        log_datetime_pipeline(out)
+        sanity_check_football_vn_time(out)
+        return out
+
+    date_s, time_s, src_tz = extract_source_fields_for_conversion(out)
+    if not src_tz:
+        inferred = infer_source_timezone(out)
+        if inferred:
+            log.info("TIME INFERRED TZ: %s for %r", inferred, out.get("title"))
+            src_tz = inferred
+    if not _DATE_RE.match(date_s):
+        return None
+    time_norm, is_approx = _parse_time_flexible(time_s)
+    if not time_norm:
+        return None
+    if not src_tz or not is_valid_source_timezone(src_tz):
+        log.warning(
+            "TIME: unknown timezone for %r tz=%r",
+            out.get("title"),
+            src_tz,
+        )
+        return None
+
+    try:
+        utc_dt = source_to_utc_datetime(date_s, time_norm, src_tz)
+    except Exception as e:
+        log.error("TIME CONVERT failed: %s", e, exc_info=True)
+        return None
+
+    fields = utc_datetime_to_local_fields(utc_dt)
+    out.update(fields)
+    out.setdefault("original_date", date_s)
+    out.setdefault("original_time", time_norm)
+    out.setdefault("original_timezone", src_tz)
+    out.setdefault("source_timezone", src_tz)
+    prec = "estimated" if is_approx else str(out.get("time_precision", "exact")).lower()
+    if prec not in ("exact", "estimated", "unknown"):
+        prec = "exact"
+    out["time_precision"] = prec
+    tm = out["local_time"]
+    out["time_display"] = f"≈{tm}" if prec == "estimated" else tm
+    out["display_time"] = tm
+    out["time_locked"] = True
+    log_datetime_pipeline(out)
+    sanity_check_football_vn_time(out)
+    return out
+
+
 def infer_source_timezone(event: dict[str, Any]) -> str | None:
     """Официальная зона по типу события, если Gemini не указал IANA."""
     b = _event_blob(event)
@@ -173,31 +433,11 @@ def convert_event_time(
     time_s: str,
     source_timezone: str,
 ) -> dict[str, str]:
-    """
-    Локальные date+time в source_timezone → Asia/Ho_Chi_Minh.
-    Без ручного offset; weekday только из converted datetime.
-    """
+    """source wall-clock → UTC → VN (legacy dict: date, time, weekday + canonical fields)."""
     if not _DATE_RE.match(date_s):
         raise ValueError(f"bad date: {date_s!r}")
-    time_norm = _normalize_hhmm(time_s)
-    if not time_norm:
-        raise ValueError(f"bad time: {time_s!r}")
-
-    zi = resolve_zone(source_timezone)
-    if zi is None:
-        raise ValueError(f"bad timezone: {source_timezone!r}")
-
-    d = date.fromisoformat(date_s)
-    hh, mm = map(int, time_norm.split(":"))
-    local_dt = datetime.combine(d, dtime(hh, mm), tzinfo=zi)
-    vn_dt = local_dt.astimezone(TARGET_TZ)
-
-    converted = {
-        "date": vn_dt.strftime("%Y-%m-%d"),
-        "time": vn_dt.strftime("%H:%M"),
-        "weekday": get_ru_weekday(vn_dt),
-    }
-    return converted
+    utc_dt = source_to_utc_datetime(date_s, time_s, source_timezone)
+    return utc_datetime_to_local_fields(utc_dt)
 
 
 def convert_event_to_vn(event: dict[str, Any]) -> tuple[dict[str, str] | None, str]:
@@ -206,38 +446,22 @@ def convert_event_to_vn(event: dict[str, Any]) -> tuple[dict[str, str] | None, s
     time_precision: exact | estimated | unknown
     """
     log.info("TIME RAW: %s", event)
-
-    date_s, time_s, src_tz = extract_source_fields(event)
-    if not src_tz:
-        inferred = infer_source_timezone(event)
-        if inferred:
-            log.info("TIME INFERRED TZ: %s for %r", inferred, event.get("title"))
-            src_tz = inferred
-
-    log.info("TIME SOURCE: %s %s %s", date_s, time_s, src_tz)
-
-    if not _DATE_RE.match(date_s):
+    applied = apply_event_datetime(dict(event))
+    if applied is None:
         return None, "unknown"
-
-    time_norm, is_approx = _parse_time_flexible(time_s)
-    if not time_norm:
-        log.warning("TIME: no parseable time for %r raw=%r", event.get("title"), time_s)
+    converted = {
+        "date": applied["date"],
+        "time": applied["time"],
+        "weekday": applied["weekday"],
+        "utc_datetime": applied["utc_datetime"],
+        "local_datetime": applied["local_datetime"],
+        "local_date": applied["local_date"],
+        "local_time": applied["local_time"],
+        "local_weekday": applied["local_weekday"],
+        "timezone": applied["timezone"],
+    }
+    prec = str(applied.get("time_precision", "exact")).lower()
+    if prec == "unknown":
         return None, "unknown"
-
-    if not src_tz or not is_valid_source_timezone(src_tz):
-        log.warning(
-            "TIME: unknown timezone for %r tz=%r — не конвертируем, время уточняется",
-            event.get("title"),
-            src_tz,
-        )
-        return None, "unknown"
-
-    try:
-        converted = convert_event_time(date_s, time_norm, src_tz)
-    except Exception as e:
-        log.error("TIME CONVERT failed: %s", e, exc_info=True)
-        return None, "unknown"
-
     log.info("TIME CONVERTED TO VN: %s", converted)
-    precision = "estimated" if is_approx else "exact"
-    return converted, precision
+    return converted, prec

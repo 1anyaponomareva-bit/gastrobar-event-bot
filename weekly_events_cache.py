@@ -32,22 +32,26 @@ def _event_dedupe_key(e: dict[str, Any]) -> tuple[str, str, str]:
 
 def event_to_cache_record(e: dict[str, Any], *, source: str = "weekly_radar") -> dict[str, Any]:
     from event_participants import extract_participants
+    from event_time import apply_event_datetime
 
     full = dict(e)
+    applied = apply_event_datetime(full)
+    if applied:
+        full = applied
     if "display_time" not in full:
         full["display_time"] = (
-            str(full.get("time_display") or full.get("time", "")).strip()
+            str(full.get("time_display") or full.get("local_time") or full.get("time", "")).strip()
         )
     return {
         "title": str(full.get("title", "")).strip(),
         "category": str(full.get("category", "")).strip(),
         "league": str(full.get("league", full.get("subtitle", ""))).strip(),
-        "date": str(full.get("date", "")).strip(),
-        "time": str(full.get("time", "")).strip(),
-        "weekday": str(full.get("weekday", "")).strip(),
-        "timezone": str(
-            full.get("source_timezone") or full.get("original_timezone") or ""
-        ).strip(),
+        "date": str(full.get("local_date") or full.get("date", "")).strip(),
+        "time": str(full.get("local_time") or full.get("time", "")).strip(),
+        "weekday": str(full.get("local_weekday") or full.get("weekday", "")).strip(),
+        "utc_datetime": str(full.get("utc_datetime", "")).strip(),
+        "local_datetime": str(full.get("local_datetime", "")).strip(),
+        "timezone": str(full.get("timezone") or "Asia/Ho_Chi_Minh").strip(),
         "confidence": str(full.get("confidence", "medium")).strip(),
         "source": str(full.get("cache_source") or source).strip(),
         "participants": extract_participants(full),
@@ -57,10 +61,17 @@ def event_to_cache_record(e: dict[str, Any], *, source: str = "weekly_radar") ->
 
 
 def record_to_event(record: dict[str, Any]) -> dict[str, Any]:
+    from event_time import apply_event_datetime
+
     if isinstance(record.get("_event"), dict):
         ev = dict(record["_event"])
         ev.setdefault("cache_source", record.get("source", "weekly_radar"))
-        return ev
+        if record.get("utc_datetime") and not ev.get("utc_datetime"):
+            ev["utc_datetime"] = record["utc_datetime"]
+        if record.get("local_datetime") and not ev.get("local_datetime"):
+            ev["local_datetime"] = record["local_datetime"]
+        applied = apply_event_datetime(ev)
+        return applied if applied else ev
     return dict(record)
 
 

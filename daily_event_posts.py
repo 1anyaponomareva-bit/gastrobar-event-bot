@@ -74,13 +74,16 @@ def normalize_event_for_daily(e: dict[str, Any]) -> dict[str, Any]:
     out = dict(e)
     out["title"] = str(out.get("title", "")).strip() or "Событие"
     out["display_time"] = str(
-        out.get("display_time") or out.get("time_display") or out.get("time", "")
+        out.get("display_time")
+        or out.get("local_time")
+        or out.get("time_display")
+        or out.get("time", "")
     ).strip()
     out["emoji"] = str(out.get("emoji", "🏟")).strip() or "🏟"
     out["subtitle"] = str(out.get("subtitle", out.get("league", ""))).strip()
     out.setdefault("daily_timing_phrase", "скоро")
-    out.setdefault("date", str(out.get("date", "")))
-    out.setdefault("weekday", str(out.get("weekday", "")))
+    out.setdefault("date", str(out.get("local_date") or out.get("date", "")))
+    out.setdefault("weekday", str(out.get("local_weekday") or out.get("weekday", "")))
     return out
 
 
@@ -153,6 +156,8 @@ async def resolve_daily_events(
 async def verify_events_for_daily(
     events: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], bool, bool]:
+    from event_time import apply_event_datetime, has_locked_datetime, reconcile_event_datetime
+
     if not events:
         return [], False, False
 
@@ -160,18 +165,33 @@ async def verify_events_for_daily(
     time_ok = True
     for e in events:
         title = e.get("title")
+        cached = dict(e)
+        if has_locked_datetime(cached):
+            locked = apply_event_datetime(cached)
+            if locked:
+                verified.append(normalize_event_for_daily(locked))
+                log.info(
+                    "daily verification: title=%r using weekly locked time utc=%s local=%s",
+                    title,
+                    locked.get("utc_datetime"),
+                    locked.get("local_datetime"),
+                )
+                continue
         try:
             r = await verify_event(e)
         except Exception:
             log.exception("daily verify failed for %r", title)
             r = None
+        if r:
+            r = reconcile_event_datetime(cached, r)
         if r and str(r.get("confidence", "medium")).lower() in ("high", "medium"):
             verified.append(normalize_event_for_daily(r))
             log.info(
-                "daily verification result: title=%r confidence=%s via=%s",
+                "daily verification result: title=%r confidence=%s via=%s utc=%s",
                 title,
                 r.get("confidence"),
                 r.get("verified_via"),
+                r.get("utc_datetime"),
             )
         elif r:
             r = normalize_event_for_daily(r)
@@ -179,7 +199,8 @@ async def verify_events_for_daily(
             verified.append(r)
             log.info("daily verification result: title=%r confidence=medium (soft)", title)
         else:
-            fallback = normalize_event_for_daily(e)
+            fallback = apply_event_datetime(cached) or cached
+            fallback = normalize_event_for_daily(fallback)
             fallback["confidence"] = "medium"
             fallback["verification_reason"] = "daily_pass_through"
             verified.append(fallback)

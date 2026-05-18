@@ -41,6 +41,11 @@ def _parse_display_minutes(e: dict[str, Any]) -> int | None:
 
 
 def event_start_datetime_vn(e: dict[str, Any]) -> datetime | None:
+    from event_time import get_event_start_vn
+
+    start = get_event_start_vn(e)
+    if start is not None:
+        return start
     date_s = str(e.get("date", "")).strip()
     try:
         d = date.fromisoformat(date_s)

@@ -309,34 +309,24 @@ def convert_to_nha_trang_time(date_s: str, time_s: str, source_timezone: str) ->
 
 
 def _iso_to_nhatrang(dt_iso: str) -> dict[str, str] | None:
-    s = str(dt_iso).strip()
-    if not s:
-        return None
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(s)
-    except ValueError:
+    from event_time import parse_datetime_iso, utc_datetime_to_local_fields
+
+    dt = parse_datetime_iso(dt_iso)
+    if dt is None:
         try:
-            d = date.fromisoformat(s[:10])
+            d = date.fromisoformat(str(dt_iso).strip()[:10])
             dt = datetime.combine(d, dtime(0, 0), tzinfo=ZoneInfo("UTC"))
         except Exception:
             return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-    nt = dt.astimezone(TARGET_TZ)
+    fields = utc_datetime_to_local_fields(dt)
     logger.info(
-        "TIME CONVERTED: %s -> %s %s %s",
+        "TIME CONVERTED: %s -> utc=%s local=%s %s",
         dt_iso,
-        nt.date().isoformat(),
-        nt.strftime("%H:%M"),
-        _WD_RU[nt.weekday()],
+        fields.get("utc_datetime"),
+        fields.get("local_date"),
+        fields.get("local_time"),
     )
-    return {
-        "date": nt.date().isoformat(),
-        "time": nt.strftime("%H:%M"),
-        "weekday": _WD_RU[nt.weekday()],
-    }
+    return fields
 
 
 def _tokenize(s: str) -> set[str]:
@@ -533,11 +523,27 @@ async def _fetch_formula_day(d: date) -> list[dict[str, Any]]:
 
 
 async def _match_apisports(event: dict[str, Any], branch: str) -> dict[str, Any] | None:
+    from event_time import apply_event_datetime, parse_datetime_iso
+
     title_cand = str(event.get("title", ""))
-    try:
-        base = date.fromisoformat(str(event.get("date", ""))[:10])
-    except ValueError:
-        return None
+    base: date | None = None
+    utc_raw = str(event.get("utc_datetime", "")).strip()
+    if utc_raw:
+        utc_dt = parse_datetime_iso(utc_raw)
+        if utc_dt is not None:
+            base = utc_dt.date()
+    if base is None:
+        orig = str(event.get("original_date", "")).strip()[:10]
+        if _DATE_RE.match(orig):
+            try:
+                base = date.fromisoformat(orig)
+            except ValueError:
+                base = None
+    if base is None:
+        try:
+            base = date.fromisoformat(str(event.get("date", ""))[:10])
+        except ValueError:
+            return None
 
     fetchers = {
         "football": _fetch_football_day,
@@ -575,12 +581,8 @@ async def _match_apisports(event: dict[str, Any], branch: str) -> dict[str, Any]
     subtitle = str(event.get("subtitle", event.get("league", ""))).strip() or row.get(
         "league", ""
     )
-    tm = conv["time"]
-    return {
-        "date": conv["date"],
-        "time": tm,
-        "time_display": tm,
-        "weekday": conv["weekday"],
+    dt_iso = str(row.get("dt_iso") or "").strip()
+    out = {
         "category": cat,
         "title": row.get("title") or title_cand,
         "subtitle": subtitle,
@@ -593,7 +595,17 @@ async def _match_apisports(event: dict[str, Any], branch: str) -> dict[str, Any]
         "verified_via": "API-SPORTS",
         "confidence": "high",
         "verification_reason": "api_sports_match",
+        "utc_datetime": conv.get("utc_datetime"),
+        "original_timezone": "UTC",
     }
+    if dt_iso:
+        parsed = parse_datetime_iso(dt_iso)
+        if parsed is not None:
+            utc_aware = parsed.astimezone(ZoneInfo("UTC"))
+            out["original_date"] = utc_aware.date().isoformat()
+            out["original_time"] = utc_aware.strftime("%H:%M")
+    applied = apply_event_datetime(out)
+    return applied
 
 
 def _truthy_verified(v: Any) -> bool:
@@ -649,22 +661,31 @@ def _gemini_verify_sync(event: dict[str, Any]) -> dict[str, Any] | None:
         logger.info("verify rejected: %s", data.get("reason", data))
         return None
 
-    from event_time import convert_event_to_vn, extract_source_fields
+    from event_time import apply_event_datetime, convert_event_to_vn
 
-    merged = dict(event)
-    merged["date"] = str(data.get("date", event.get("date", ""))).strip()
-    merged["time"] = str(data.get("time", event.get("time", ""))).strip()
-    merged["source_timezone"] = str(data.get("source_timezone", "")).strip()
-    orig_date, orig_time, orig_tz = extract_source_fields(merged)
-    if data.get("source_timezone"):
-        merged["source_timezone"] = str(data["source_timezone"]).strip()
+    src_date = str(data.get("date", "")).strip()
+    src_time = str(data.get("time", "")).strip()
+    src_tz = str(data.get("source_timezone", "")).strip()
+    if not (src_date and src_time and src_tz):
+        logger.info("skipped_no_source_fields after verify: %s", event.get("title"))
+        return None
 
-    conv, time_precision = convert_event_to_vn(merged)
+    conv_input = {
+        "title": event.get("title"),
+        "category": event.get("category"),
+        "original_date": src_date,
+        "original_time": src_time,
+        "original_timezone": src_tz,
+        "source_timezone": src_tz,
+    }
+    conv, time_precision = convert_event_to_vn(conv_input)
     if conv is None:
         logger.info("skipped_no_timezone_or_convert: %s", event.get("title"))
         return None
 
-    date_s = orig_date or str(data.get("date", "")).strip()
+    date_s = src_date
+    orig_time = src_time
+    orig_tz = src_tz
 
     tp = str(data.get("time_precision", time_precision)).lower().strip()
     if tp not in ("exact", "estimated", "unknown"):
@@ -692,15 +713,15 @@ def _gemini_verify_sync(event: dict[str, Any]) -> dict[str, Any] | None:
         logger.info("skipped_abstract_title equals subtitle after verify: %s", title)
         return None
 
-    return {
+    built = {
         "date": conv["date"],
         "time": tm,
         "time_display": disp,
         "weekday": conv["weekday"],
         "original_date": date_s,
         "original_time": orig_time,
-        "original_timezone": merged.get("source_timezone", orig_tz),
-        "source_timezone": merged.get("source_timezone", orig_tz),
+        "original_timezone": orig_tz,
+        "source_timezone": orig_tz,
         "category": cat,
         "title": title,
         "subtitle": subtitle,
@@ -713,7 +734,10 @@ def _gemini_verify_sync(event: dict[str, Any]) -> dict[str, Any] | None:
         "verified_via": "Gemini",
         "confidence": "high",
         "verification_reason": "gemini_verify_pass",
+        "utc_datetime": conv.get("utc_datetime"),
+        "local_datetime": conv.get("local_datetime"),
     }
+    return apply_event_datetime(built)
 
 
 def _log_verify_removed(title: str, reason: str, event: dict[str, Any]) -> None:
@@ -743,73 +767,87 @@ def event_from_search_candidate(
     """
     Событие из Gemini Search: конвертация времени только в Python (event_time).
     """
-    from event_time import convert_event_to_vn, extract_source_fields
+    from event_time import (
+        apply_event_datetime,
+        convert_event_to_vn,
+        extract_source_fields,
+        has_locked_datetime,
+    )
 
     title = str(event.get("title", "")).strip()
     if not title or len(title) < 3:
         _log_verify_removed(title, "missing_title", event)
         return None
 
-    orig_date, orig_time, orig_tz = extract_source_fields(event)
-    if not _DATE_RE.match(orig_date):
-        _log_verify_removed(title, "bad_date", event)
-        return None
-
-    tl = title.lower()
-    if tl in _ABSTRACT_TITLES:
-        _log_verify_removed(title, "abstract_title", event)
-        return None
-    sub0 = str(event.get("subtitle", event.get("league", ""))).strip()
-    if sub0 and tl == sub0.lower():
-        _log_verify_removed(title, "title_equals_subtitle", event)
-        return None
-
-    conv, time_precision = convert_event_to_vn(event)
-
-    if conv is None:
-        _log_verify_removed(title, "no_timezone_convert", event)
-        return None
-
-    out_date = conv["date"]
-    out_time = conv["time"]
-    out_weekday = conv["weekday"]
-    if not out_time or not out_weekday:
-        _log_verify_removed(title, "missing_vn_time", event)
-        return None
-    if time_precision == "unknown":
-        _log_verify_removed(title, "time_precision_unknown", event)
-        return None
-    if time_precision == "estimated":
-        time_display = f"≈{out_time}"
+    if has_locked_datetime(event):
+        applied = apply_event_datetime(dict(event))
+        if applied is None:
+            _log_verify_removed(title, "locked_datetime_invalid", event)
+            return None
+        out = applied
+        out.setdefault("verified_via", verified_via)
+        out.setdefault("confidence", confidence)
+        out.setdefault("verification_reason", verification_reason)
     else:
-        time_display = out_time
+        orig_date, orig_time, orig_tz = extract_source_fields(event)
+        if not _DATE_RE.match(orig_date):
+            _log_verify_removed(title, "bad_date", event)
+            return None
 
-    cat = str(event.get("category", "EVENT")).strip()[:48] or "EVENT"
-    subtitle = str(event.get("subtitle", event.get("league", ""))).strip()
-    why = str(event.get("why", "")).strip()
+        tl = title.lower()
+        if tl in _ABSTRACT_TITLES:
+            _log_verify_removed(title, "abstract_title", event)
+            return None
+        sub0 = str(event.get("subtitle", event.get("league", ""))).strip()
+        if sub0 and tl == sub0.lower():
+            _log_verify_removed(title, "title_equals_subtitle", event)
+            return None
 
-    out = {
-        "date": out_date,
-        "time": out_time,
-        "time_display": time_display,
-        "weekday": out_weekday,
-        "original_date": orig_date,
-        "original_time": orig_time,
-        "original_timezone": orig_tz,
-        "source_timezone": orig_tz,
-        "category": cat,
-        "title": title,
-        "subtitle": subtitle,
-        "league": subtitle,
-        "emoji": emoji_for_event(
-            {"title": title, "category": cat, "subtitle": subtitle}
-        ),
-        "why": why,
-        "time_precision": time_precision,
-        "verified_via": verified_via,
-        "confidence": confidence,
-        "verification_reason": verification_reason,
-    }
+        conv, time_precision = convert_event_to_vn(event)
+
+        if conv is None:
+            _log_verify_removed(title, "no_timezone_convert", event)
+            return None
+
+        if time_precision == "unknown":
+            _log_verify_removed(title, "time_precision_unknown", event)
+            return None
+
+        cat = str(event.get("category", "EVENT")).strip()[:48] or "EVENT"
+        subtitle = str(event.get("subtitle", event.get("league", ""))).strip()
+        why = str(event.get("why", "")).strip()
+
+        out = {
+            "date": conv["date"],
+            "time": conv["time"],
+            "weekday": conv["weekday"],
+            "original_date": orig_date,
+            "original_time": orig_time,
+            "original_timezone": orig_tz,
+            "source_timezone": orig_tz,
+            "category": cat,
+            "title": title,
+            "subtitle": subtitle,
+            "league": subtitle,
+            "emoji": emoji_for_event(
+                {"title": title, "category": cat, "subtitle": subtitle}
+            ),
+            "why": why,
+            "time_precision": time_precision,
+            "verified_via": verified_via,
+            "confidence": confidence,
+            "verification_reason": verification_reason,
+            "utc_datetime": conv.get("utc_datetime"),
+            "local_datetime": conv.get("local_datetime"),
+        }
+        applied = apply_event_datetime(out)
+        if applied is None:
+            _log_verify_removed(title, "apply_datetime_failed", event)
+            return None
+        out = applied
+        if not out.get("time") or not out.get("weekday"):
+            _log_verify_removed(title, "missing_vn_time", event)
+            return None
 
     if gastrobar_hard_reject(out):
         _log_verify_removed(title, "gastrobar_hard_reject", event)
@@ -846,10 +884,27 @@ async def verify_event(event: dict[str, Any]) -> dict[str, Any] | None:
   - entertainment/esports: medium из Gemini Search (без второго verify по умолчанию)
   - RADAR_STRICT_VERIFY=1 — дополнительно старый жёсткий Gemini verify
     """
+    from event_time import has_locked_datetime
+
     async with _verify_sem:
         title = str(event.get("title", "")).strip()
         category = str(event.get("category", "")).strip()
         logger.info("VERIFY INPUT: %s", event)
+
+        if has_locked_datetime(event):
+            preserved = event_from_search_candidate(
+                event,
+                confidence=str(event.get("confidence", "medium")),
+                verified_via=str(event.get("verified_via", "weekly_cache")),
+                verification_reason="datetime_locked_no_reconvert",
+            )
+            if preserved:
+                logger.info(
+                    "VERIFY: preserved locked datetime title=%r utc=%s",
+                    title,
+                    preserved.get("utc_datetime"),
+                )
+                return preserved
 
         if gastrobar_hard_reject(event):
             _log_verify_removed(title, "gastrobar_hard_reject_input", event)
