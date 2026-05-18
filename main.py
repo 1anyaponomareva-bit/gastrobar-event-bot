@@ -26,6 +26,7 @@ from aiogram.types import (
 
 from ai_generator import generate_weekly_poster
 from daily_event_posts import (
+    CACHE_EMPTY_MSG,
     build_daily_content_package,
     deliver_daily_content,
     user_error_message,
@@ -437,10 +438,6 @@ async def radar_week_generate(callback: CallbackQuery) -> None:
 async def radar_post_now24(callback: CallbackQuery) -> None:
     await callback.answer()
     logger.info("radar:post_now24 clicked")
-    events = last_now24_events.get(callback.from_user.id) or []
-    if not events:
-        await callback.message.answer("Нет событий для поста на ближайшие 24 часа.")
-        return
     chat_id = callback.message.chat.id
     try:
         async with long_operation_typing(
@@ -450,9 +447,24 @@ async def radar_post_now24(callback: CallbackQuery) -> None:
             progress_label="пост на сегодня",
         ):
             result = await asyncio.wait_for(
-                build_daily_content_package(events, log_prefix="radar_post_now24"),
+                build_daily_content_package(log_prefix="radar_post_now24"),
                 timeout=WEEK_FETCH_TIMEOUT_SEC,
             )
+        if result.error_code == "cache_empty":
+            await callback.message.answer(CACHE_EMPTY_MSG)
+            async with long_operation_typing(
+                callback.bot,
+                chat_id,
+                initial_text="🔍 Быстрый поиск ближайших 24 часов…",
+                progress_label="поиск 24ч",
+            ):
+                result = await asyncio.wait_for(
+                    build_daily_content_package(
+                        log_prefix="radar_post_now24",
+                        force_fresh_fallback=True,
+                    ),
+                    timeout=WEEK_FETCH_TIMEOUT_SEC,
+                )
     except asyncio.TimeoutError:
         await callback.message.answer("Таймаут. Повторите позже.")
         return
@@ -485,6 +497,21 @@ async def cmd_daily(message: Message) -> None:
                 build_daily_content_package(log_prefix="cmd_daily"),
                 timeout=WEEK_FETCH_TIMEOUT_SEC,
             )
+        if result.error_code == "cache_empty":
+            await message.answer(CACHE_EMPTY_MSG)
+            async with long_operation_typing(
+                message.bot,
+                message.chat.id,
+                initial_text="🔍 Быстрый поиск ближайших 24 часов…",
+                progress_label="поиск 24ч",
+            ):
+                result = await asyncio.wait_for(
+                    build_daily_content_package(
+                        log_prefix="cmd_daily",
+                        force_fresh_fallback=True,
+                    ),
+                    timeout=WEEK_FETCH_TIMEOUT_SEC,
+                )
         if not result.ok or not result.package:
             logger.warning(
                 "cmd /daily failed: code=%s detail=%s",
@@ -727,6 +754,9 @@ async def main() -> None:
         raise SystemExit("TELEGRAM_BOT_TOKEN is missing")
 
     await init_db()
+    from weekly_events_cache import load_weekly_events_cache
+
+    await load_weekly_events_cache()
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     try:
         me = await bot.get_me()

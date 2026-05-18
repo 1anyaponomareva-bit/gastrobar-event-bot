@@ -1,5 +1,6 @@
 """
 Daily Content Generator — готовый пост для Telegram Gastrobar.
+Weekly cache = source of truth; fresh search только как fallback.
 """
 
 from __future__ import annotations
@@ -15,7 +16,12 @@ from aiogram import Bot
 from aiogram.types import BufferedInputFile, FSInputFile
 
 from ai_generator import generate_daily_campaign_post, generate_daily_event_post
-from config import ADMIN_ID, TIMEZONE
+from config import TIMEZONE
+from daily_display import (
+    format_daily_status_message,
+    format_single_daily_post_template,
+    post_text_includes_schedule,
+)
 from daily_event import select_now24_events
 from database import (
     insert_draft,
@@ -26,8 +32,17 @@ from database import (
 from event_radar import get_event_radar_now24
 from event_verifier import verify_event
 from image_finder import find_event_image
+from weekly_events_cache import (
+    get_weekly_events_cache,
+    merge_events_into_weekly_cache,
+)
 
 log = logging.getLogger(__name__)
+
+CACHE_EMPTY_MSG = (
+    "Недельная афиша ещё не собрана. Сначала соберите /events → Афиша на неделю, "
+    "или я сделаю быстрый поиск ближайших 24 часов."
+)
 
 
 @dataclass
@@ -52,7 +67,6 @@ class DailyBuildResult:
 
 
 def normalize_event_for_daily(e: dict[str, Any]) -> dict[str, Any]:
-    """Минимальный формат для Gemini daily post."""
     out = dict(e)
     out["title"] = str(out.get("title", "")).strip() or "Событие"
     out["display_time"] = str(
@@ -66,11 +80,61 @@ def normalize_event_for_daily(e: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-async def fetch_now24_events_for_daily() -> tuple[list[dict[str, Any]], int, str | None]:
-    """События ближайших 24 ч (тот же путь, что radar:now24)."""
+async def collect_daily_candidates_from_weekly_cache() -> list[dict[str, Any]]:
+    cached = await get_weekly_events_cache()
+    log.info("daily using weekly cache: %s events", len(cached))
+    candidates = select_now24_events(cached)
+    log.info("daily next24 candidates from cache: %s", len(candidates))
+    return candidates
+
+
+async def collect_daily_candidates_fresh() -> tuple[list[dict[str, Any]], str | None]:
+    log.info("daily fresh search fallback started")
     events, raw_total, _, _, fetch_note = await get_event_radar_now24()
-    log.info("daily now24 fetch: selected=%s raw_total=%s note=%s", len(events), raw_total, fetch_note)
-    return events, raw_total, fetch_note
+    log.info(
+        "daily fresh search result: selected=%s raw_total=%s note=%s",
+        len(events),
+        raw_total,
+        fetch_note,
+    )
+    if events:
+        await merge_events_into_weekly_cache(events, source="daily_fresh_search")
+    return events, fetch_note
+
+
+async def resolve_daily_events(
+    events: list[dict[str, Any]] | None = None,
+    *,
+    force_fresh_fallback: bool = False,
+) -> tuple[list[dict[str, Any]], str]:
+    """
+    Источник событий для поста дня.
+    Возвращает (events, source_tag).
+    source_tag: provided | weekly_cache | fresh_fallback | cache_empty
+    """
+    if events is not None:
+        log.info("daily using provided events: %s", len(events))
+        return [normalize_event_for_daily(e) for e in events], "provided"
+
+    cached = await get_weekly_events_cache()
+    if not cached and not force_fresh_fallback:
+        log.info("daily: weekly cache empty")
+        return [], "cache_empty"
+
+    candidates = await collect_daily_candidates_from_weekly_cache()
+    if candidates:
+        return candidates, "weekly_cache"
+
+    if not force_fresh_fallback:
+        if not cached:
+            return [], "cache_empty"
+        log.info("daily: no events in 24h window from weekly cache")
+        return [], "no_events_in_cache"
+
+    fresh, _ = await collect_daily_candidates_fresh()
+    if fresh:
+        return fresh, "fresh_fallback"
+    return [], "no_events"
 
 
 async def verify_events_for_daily(
@@ -120,47 +184,73 @@ async def verify_events_for_daily(
     return verified, verified_ok, time_ok
 
 
+async def _generate_post_text(post_events: list[dict[str, Any]]) -> str:
+    if len(post_events) == 1:
+        ev = post_events[0]
+        try:
+            post_text = await generate_daily_event_post(ev)
+        except Exception:
+            log.warning("daily: Gemini single post failed, using template")
+            post_text = format_single_daily_post_template(ev)
+        if not post_text_includes_schedule(post_text, ev):
+            log.info("daily: Gemini post missing time, using template")
+            post_text = format_single_daily_post_template(ev)
+        return post_text
+
+    if len(post_events) == 2:
+        from daily_tv import format_dual_screen_daily_post
+
+        return format_dual_screen_daily_post(post_events)
+
+    return await generate_daily_campaign_post(post_events)
+
+
 async def build_daily_content_package(
     events: list[dict[str, Any]] | None = None,
     *,
     log_prefix: str = "daily",
+    force_fresh_fallback: bool = False,
 ) -> DailyBuildResult:
     log.info("%s started", log_prefix)
 
     try:
-        if events is not None:
-            now24 = [normalize_event_for_daily(e) for e in events]
-            log.info("%s using provided events: %s", log_prefix, len(now24))
-        else:
-            now24, raw_total, fetch_note = await fetch_now24_events_for_daily()
-            log.info(
-                "%s now24 events found: %s (raw_total=%s note=%s)",
-                log_prefix,
-                len(now24),
-                raw_total,
-                fetch_note,
+        now24, source_tag = await resolve_daily_events(
+            events,
+            force_fresh_fallback=force_fresh_fallback,
+        )
+
+        if source_tag == "cache_empty":
+            return DailyBuildResult(
+                ok=False,
+                error_code="cache_empty",
+                error_detail=CACHE_EMPTY_MSG,
             )
 
         if not now24:
-            log.info("%s: no events in 24h window", log_prefix)
+            log.info("%s: no events in 24h window (source=%s)", log_prefix, source_tag)
             return DailyBuildResult(
                 ok=False,
                 error_code="no_events",
                 error_detail="Крупных событий в ближайшие 24 часа нет.",
             )
 
-        primary = now24[0]
-        log.info(
-            "%s selected event for daily post: %r (priority list head, total=%s)",
-            log_prefix,
-            primary.get("title"),
-            len(now24),
-        )
+        for e in now24:
+            log.info(
+                "daily selected event: title=%r source=%s display_time=%s",
+                e.get("title"),
+                source_tag,
+                e.get("display_time"),
+            )
 
         verified, verified_ok, time_ok = await verify_events_for_daily(now24)
         from daily_tv import apply_tv_limit_for_digest
 
         verified, skipped_tv = apply_tv_limit_for_digest(verified)
+        for e in skipped_tv:
+            log.info(
+                "daily skipped event: title=%r reason=skipped_due_to_tv_limit",
+                e.get("title"),
+            )
         if skipped_tv:
             log.info(
                 "%s tv_limit: kept=%s skipped=%s",
@@ -176,34 +266,31 @@ async def build_daily_content_package(
                 error_detail="Не удалось подтвердить события.",
             )
         log.info(
-            "%s verification summary: ok=%s time_ok=%s count=%s",
+            "%s verification summary: ok=%s time_ok=%s count=%s source=%s",
             log_prefix,
             verified_ok,
             time_ok,
             len(verified),
+            source_tag,
         )
 
         post_events = verified if len(verified) > 1 else [verified[0]]
         log.info("%s generate text started (events=%s)", log_prefix, len(post_events))
         try:
-            if len(post_events) == 1:
-                post_text = await generate_daily_event_post(post_events[0])
-            elif len(post_events) == 2:
-                from daily_tv import format_dual_screen_daily_post
-
-                post_text = format_dual_screen_daily_post(post_events)
-            else:
-                post_text = await generate_daily_campaign_post(post_events)
+            post_text = await _generate_post_text(post_events)
             if not (post_text or "").strip():
                 raise RuntimeError("empty post text")
             log.info("%s generate text result: ok len=%s", log_prefix, len(post_text))
         except Exception as e:
             log.error("daily post generation failed", exc_info=True)
-            return DailyBuildResult(
-                ok=False,
-                error_code="gemini_text_failed",
-                error_detail=str(e)[:200] or "Gemini text generation failed",
-            )
+            if len(post_events) == 1:
+                post_text = format_single_daily_post_template(post_events[0])
+            else:
+                return DailyBuildResult(
+                    ok=False,
+                    error_code="gemini_text_failed",
+                    error_detail=str(e)[:200] or "Gemini text generation failed",
+                )
 
         draft_id = await insert_draft("daily_campaign", post_text, "draft")
         primary = verified[0]
@@ -225,7 +312,7 @@ async def build_daily_content_package(
                 bool(image_path),
                 bool(image_bytes),
             )
-        except Exception as e:
+        except Exception:
             log.error("%s image search failed", log_prefix, exc_info=True)
             image_missing = True
             image_source = "error"
@@ -247,7 +334,11 @@ async def build_daily_content_package(
                 draft_id=draft_id,
                 status="ready",
             )
-            await save_radar_snapshot("now24", verified, {"source": log_prefix})
+            await save_radar_snapshot(
+                "now24",
+                verified,
+                {"source": log_prefix, "weekly_source": source_tag},
+            )
         except Exception:
             log.exception("%s: db snapshot failed (non-fatal)", log_prefix)
 
@@ -276,6 +367,7 @@ async def build_daily_content_package(
 
 _USER_ERROR_RU = {
     "no_events": "Крупных событий в ближайшие 24 часа нет.",
+    "cache_empty": CACHE_EMPTY_MSG,
     "verification_failed": "Ошибка: verification failed",
     "gemini_text_failed": "Ошибка: Gemini text generation failed",
     "unexpected": "Ошибка: unexpected error",
@@ -283,12 +375,10 @@ _USER_ERROR_RU = {
 
 
 def user_error_message(result: DailyBuildResult) -> str:
+    if result.error_code in _USER_ERROR_RU:
+        return _USER_ERROR_RU[result.error_code]
     if result.error_code == "gemini_text_failed":
         return f"Ошибка: Gemini text generation failed\n({result.error_detail[:120]})"
-    if result.error_code == "verification_failed":
-        return "Ошибка: verification failed"
-    if result.error_code == "no_events":
-        return _USER_ERROR_RU["no_events"]
     if result.error_code == "unexpected":
         return f"Ошибка: unexpected error\n({result.error_detail[:120]})"
     return result.error_detail or "Не удалось сгенерировать пост дня."
@@ -300,6 +390,7 @@ async def deliver_daily_content(
     *,
     chat_id: int | None = None,
 ) -> None:
+    from config import ADMIN_ID
     from keyboards import daily_preview_kb
 
     target = chat_id or ADMIN_ID
@@ -307,17 +398,13 @@ async def deliver_daily_content(
         log.warning("No chat_id for daily delivery")
         return
 
-    titles = ", ".join(str(e.get("title", ""))[:40] for e in pkg.events[:3])
-    status = (
-        "✅ Пост дня · Gastrobar\n\n"
-        f"События: {titles}\n"
-        f"{'✅' if pkg.verified_ok else '⚠️'} событие подтверждено\n"
-        f"{'✅' if pkg.time_ok else '⚠️'} время ({TIMEZONE})\n"
+    status = format_daily_status_message(
+        pkg.events,
+        verified_ok=pkg.verified_ok,
+        time_ok=pkg.time_ok,
+        image_missing=pkg.image_missing,
+        image_source=pkg.image_source,
     )
-    if pkg.image_missing:
-        status += "⚠️ Картинку не нашёл, отправляю только текст.\n"
-    else:
-        status += f"✅ картинка: {pkg.image_source}\n"
     await bot.send_message(target, status)
 
     kb = daily_preview_kb(pkg.draft_id)
@@ -340,7 +427,6 @@ async def deliver_daily_content(
         await bot.send_message(target, caption, reply_markup=kb)
 
 
-# Совместимость со scheduler
 async def deliver_daily_content_to_admin(
     bot: Bot,
     pkg: DailyContentPackage,
@@ -353,6 +439,12 @@ async def deliver_daily_content_to_admin(
 async def run_scheduled_daily_content(bot: Bot) -> None:
     log.info("scheduled daily content generator started")
     result = await build_daily_content_package(log_prefix="scheduled_daily")
+    if result.error_code == "cache_empty":
+        log.info("scheduled daily: empty weekly cache, trying fresh fallback")
+        result = await build_daily_content_package(
+            log_prefix="scheduled_daily",
+            force_fresh_fallback=True,
+        )
     if not result.ok or not result.package:
         log.info("scheduled daily: skip reason=%s", result.error_code)
         return

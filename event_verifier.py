@@ -812,6 +812,13 @@ def event_from_search_candidate(
         _log_verify_removed(title, "gastrobar_hard_reject", event)
         return None
 
+    from event_participants import passes_participant_rules
+
+    ok_part, part_reason = passes_participant_rules(out)
+    if not ok_part:
+        _log_verify_removed(title, f"participants_{part_reason}", event)
+        return None
+
     return out
 
 

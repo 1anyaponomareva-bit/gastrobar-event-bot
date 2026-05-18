@@ -76,7 +76,9 @@ def _daily_priority_score(e: dict[str, Any]) -> int:
             return 1
     if "eurovision" in b:
         return 2
-    if re.search(r"\bucl\b|champions\s+league|uefa\s+champions", b):
+    if re.search(
+        r"\bucl\b|champions\s+league|uefa\s+champions|europa\s+league|\buel\b", b
+    ):
         return 3
     if "nba" in b and re.search(r"playoff|final|conference", b):
         return 4
@@ -170,8 +172,12 @@ def select_now24_events(
     now = now or _vn_now()
     pool = events or []
     candidates: list[dict[str, Any]] = []
+    from event_participants import is_gastrobar_eligible
+
     for e in pool:
         if int(e.get("radar_tier", 99)) >= 99:
+            continue
+        if not is_gastrobar_eligible(e):
             continue
         if not is_in_daily_window(e, now):
             continue
@@ -216,6 +222,8 @@ def collect_campaign_events(
     now = now or _vn_now()
     pool = events or []
     out: list[dict[str, Any]] = []
+    from event_participants import is_gastrobar_eligible
+
     for e in pool:
         if not is_in_daily_window(e, now):
             continue
@@ -223,6 +231,8 @@ def collect_campaign_events(
         if cpd and cpd != now.date():
             continue
         if int(e.get("radar_tier", 99)) >= 99:
+            continue
+        if not is_gastrobar_eligible(e):
             continue
         out.append(enrich_daily_campaign_meta(e, now))
     out.sort(

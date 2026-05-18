@@ -11,6 +11,7 @@ from typing import Any
 
 from bar_hours import infer_duration_minutes
 from config import GASTROBAR_TV_COUNT, TIMEZONE
+from daily_display import format_event_schedule_line
 from daily_event import _daily_priority_score, event_start_datetime_vn
 from zoneinfo import ZoneInfo
 
@@ -167,21 +168,33 @@ def format_dual_screen_daily_post(events: list[dict[str, Any]]) -> str:
     e1, e2 = ordered
     em1 = str(e1.get("emoji", "🏟")).strip() or "🏟"
     em2 = str(e2.get("emoji", "🏟")).strip() or "🏟"
-    t1 = str(e1.get("display_time") or e1.get("time", "")).strip()
-    t2 = str(e2.get("display_time") or e2.get("time", "")).strip()
+    sched1 = format_event_schedule_line(e1)
+    sched2 = format_event_schedule_line(e2)
     title1 = str(e1.get("title", "")).strip()
     title2 = str(e2.get("title", "")).strip()
+    sub1 = str(e1.get("subtitle", e1.get("league", ""))).strip()
+    sub2 = str(e2.get("subtitle", e2.get("league", ""))).strip()
 
     lines = [
         "Сегодня ночью у нас двойной экран 😏",
         "",
         "На одном:",
-        f"{em1} {t1} — {title1}",
-        "",
-        "На втором:",
-        f"{em2} {t2} — {title2}",
-        "",
+        f"{em1} 🕒 {sched1}",
+        title1,
     ]
+    if sub1 and sub1.lower() != title1.lower():
+        lines.append(sub1)
+    lines.extend(
+        [
+            "",
+            "На втором:",
+            f"{em2} 🕒 {sched2}",
+            title2,
+        ]
+    )
+    if sub2 and sub2.lower() != title2.lower():
+        lines.append(sub2)
+    lines.append("")
     if events_are_simultaneous(e1, e2):
         lines.append("У нас 2 телевизора — можно включить оба.")
         lines.append("")

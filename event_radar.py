@@ -280,6 +280,13 @@ Each item MUST include:
 - source_timezone — IANA only (e.g. Europe/Zurich, America/New_York, America/Toronto)
 - category, title, optional subtitle, why_it_matters
 
+PARTICIPANT RULES (strict):
+- Sports matches / finals: title MUST name both sides (e.g. "Real Madrid — Barcelona", "Spurs vs Thunder"). Never "Between top clubs" or vague descriptions in title/subtitle.
+- UFC / boxing: both fighters in title OR "UFC Fight Night: Name vs Name".
+- F1: session type in title (Qualifying, Sprint, Race) — not Practice.
+- Eurovision: Semi-final or Grand Final in title.
+- Esports: tournament + stage (e.g. "IEM Atlanta 2026 — Grand Final"), not "Final Day Events".
+
 CRITICAL TIME RULES:
 - Do NOT convert to Asia/Ho_Chi_Minh or Vietnam time yourself.
 - Do NOT output weekday — Python will compute it after conversion.
@@ -550,6 +557,17 @@ def _validate_concrete_event(raw: dict[str, Any]) -> dict[str, Any] | None:
         "why": why,
     }
     if gastrobar_hard_reject(cand_pre):
+        return None
+
+    from event_participants import passes_participant_rules
+
+    ok_part, part_reason = passes_participant_rules(cand_pre)
+    if not ok_part:
+        log.info(
+            "local_validation_removed: participants title=%s reason=%s",
+            title,
+            part_reason,
+        )
         return None
 
     if is_f1_excluded_event(cand_pre):
@@ -830,7 +848,10 @@ def _select_final_radar_events(verified: list[dict[str, Any]]) -> list[dict[str,
         for e in verified
         if str(e.get("confidence", "medium")).lower() in ("high", "medium")
     ]
+    from event_participants import filter_events_by_participants
+
     prepared = [_prepare_for_afisha_selection(dict(e)) for e in verified]
+    prepared = filter_events_by_participants(prepared, log_prefix="weekly_select")
     eligible = [e for e in prepared if int(e.get("radar_tier", 99)) < RADAR_TIER_LOW]
     eligible.sort(key=_tier_sort_key)
 
@@ -1051,6 +1072,10 @@ async def get_event_radar_week() -> tuple[list[dict[str, Any]], int, int, int, s
     else:
         final = _finalize_week_selection(pool, prelim)
     log.info("Event Radar week final=%s", len(final))
+    if final:
+        from weekly_events_cache import save_weekly_events_cache
+
+        await save_weekly_events_cache(final, source="weekly_radar")
     return final, raw_total, len(prelim), len(final), fetch_note
 
 
