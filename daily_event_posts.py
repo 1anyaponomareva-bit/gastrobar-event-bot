@@ -75,7 +75,7 @@ def normalize_event_for_daily(e: dict[str, Any]) -> dict[str, Any]:
     out["title"] = str(out.get("title", "")).strip() or "Событие"
     out["display_time"] = str(
         out.get("display_time") or out.get("time_display") or out.get("time", "")
-    ).strip() or "время уточняется"
+    ).strip()
     out["emoji"] = str(out.get("emoji", "🏟")).strip() or "🏟"
     out["subtitle"] = str(out.get("subtitle", out.get("league", ""))).strip()
     out.setdefault("daily_timing_phrase", "скоро")
