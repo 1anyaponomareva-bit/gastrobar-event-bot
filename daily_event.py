@@ -143,7 +143,7 @@ def _prune_weak_rpl_if_strong_alternatives(
     """
     from watchability import detect_editorial_type
 
-    if len(candidates) < 6:
+    if len(candidates) < 10:
         return candidates
 
     def strength(e: dict[str, Any]) -> int:
@@ -282,15 +282,19 @@ def select_now24_events(
         if gastrobar_hard_reject(ev):
             continue
         if str(ev.get("category", "")).upper() == "FOOTBALL" and ev.get("league_id") is not None:
-            item = {
-                "league_id": ev.get("league_id"),
-                "league_country": ev.get("league_country", ""),
-                "league": ev.get("league") or ev.get("subtitle", ""),
-                "title": ev.get("title", ""),
-            }
-            if not is_eligible_football_league_now24(item):
-                continue
-            fb_score, _ = football_watchability_score(item, ev)
+            fb_score = ev.get("football_watchability_score")
+            if fb_score is None:
+                item = {
+                    "league_id": ev.get("league_id"),
+                    "league_country": ev.get("league_country", ""),
+                    "league": ev.get("league") or ev.get("subtitle", ""),
+                    "title": ev.get("title", ""),
+                }
+                if not is_eligible_football_league_now24(item):
+                    continue
+                fb_score, _ = football_watchability_score(item, ev)
+            else:
+                fb_score = int(fb_score)
             if fb_score < NOW24_FOOTBALL_MIN_WATCHABILITY:
                 continue
             ev["football_watchability_score"] = fb_score

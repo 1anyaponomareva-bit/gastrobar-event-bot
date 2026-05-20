@@ -9,18 +9,70 @@ from typing import Any
 
 from config import NOW24_FOOTBALL_MIN_WATCHABILITY, SPORTS_API_KEY
 from football_watchability import (
+    _UEFA_CUPS,
     football_watchability_score,
     is_eligible_football_league_now24,
     passes_now24_football_threshold,
 )
-from next24 import is_in_next24_window, log_next24_window_header
+from next24 import is_in_next24_window, log_next24_window_header, resolve_event_local_datetime_vn
 from radar_sports_convert import lock_api_sports_program_item
 from sports_events import (
-    is_weekly_radar_api_worthy,
+    _WORLD_HOCKEY_NATIONS,
+    _has_matchup_title,
+    _is_excluded_event,
+    _is_world_championship_hockey,
     raw_event_to_radar_program_item,
 )
 
 log = logging.getLogger(__name__)
+
+
+def is_now24_api_sport_worthy(e: dict[str, Any]) -> bool:
+    """
+    Мягче weekly: для 24 ч нужны матчи сегодня/завтра (UEL, ЧМ по хоккею, NHL, KHL…).
+    """
+    if _is_excluded_event(e):
+        return False
+    sport = str(e.get("sport", "")).lower()
+    title = str(e.get("title", "")).strip()
+    league = str(e.get("league", "")).lower()
+
+    if sport == "football":
+        if not _has_matchup_title(title):
+            return False
+        if is_eligible_football_league_now24(e):
+            return True
+        try:
+            lid = int(e.get("league_id") or 0)
+        except (TypeError, ValueError):
+            lid = 0
+        if lid in _UEFA_CUPS:
+            return True
+        return False
+
+    if sport == "hockey":
+        if not _has_matchup_title(title):
+            return False
+        if _is_world_championship_hockey(e):
+            return True
+        if "nhl" in league or "stanley" in league or "khl" in league or "playoff" in league:
+            return True
+        if "world championship" in league or "iihf" in league:
+            return True
+        tl = title.lower()
+        nations = sum(1 for n in _WORLD_HOCKEY_NATIONS if n in tl)
+        return nations >= 2
+
+    if sport == "basketball":
+        return "nba" in league.lower() or "nba" in title.lower()
+
+    if sport in ("formula1", "f1"):
+        return True
+
+    if sport == "esports":
+        return bool(title) and len(title) >= 6
+
+    return False
 
 
 def _prepare_now24_event(locked: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
@@ -59,24 +111,37 @@ async def _now24_filter_pool(
     *,
     phase: str,
     min_watchability: int | None = None,
+    stats: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for e in raw:
-        if not is_weekly_radar_api_worthy(e):
+        if stats is not None:
+            stats["raw"] = stats.get("raw", 0) + 1
+        if not is_now24_api_sport_worthy(e):
+            if stats is not None:
+                stats["drop_worthy"] = stats.get("drop_worthy", 0) + 1
             continue
         item = raw_event_to_radar_program_item(e)
         locked = lock_api_sports_program_item(item, phase=phase)
         if not locked:
+            if stats is not None:
+                stats["drop_lock"] = stats.get("drop_lock", 0) + 1
             continue
         if not is_in_next24_window(locked, log_checks=False):
+            if stats is not None:
+                stats["drop_window"] = stats.get("drop_window", 0) + 1
             continue
         if min_watchability is not None:
             from event_radar import _prepare_for_afisha_selection
 
             prep = _prepare_for_afisha_selection(locked)
             if int(prep.get("watchability_score", 0)) < min_watchability:
+                if stats is not None:
+                    stats["drop_score"] = stats.get("drop_score", 0) + 1
                 continue
         out.append(_prepare_now24_event(locked, item))
+        if stats is not None:
+            stats["kept"] = stats.get("kept", 0) + 1
     return out
 
 
@@ -98,8 +163,9 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
 
     log_next24_window_header()
 
+    # Сегодня + завтра + послезавтра (VN) — чтобы не пропустить вечерние матчи
     football_raw = await _now24_from_sport_fetch(
-        get_football_events_next_days_vn(days_ahead=2),
+        get_football_events_next_days_vn(days_ahead=3),
         label="football",
     )
     hockey_raw = await _now24_from_sport_fetch(get_hockey_events(), label="hockey")
@@ -119,48 +185,74 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
     )
 
     out: list[dict[str, Any]] = []
+    fb_stats: dict[str, int] = {}
 
     for item in football_raw:
+        fb_stats["raw"] = fb_stats.get("raw", 0) + 1
         if not is_eligible_football_league_now24(item):
+            fb_stats["drop_league"] = fb_stats.get("drop_league", 0) + 1
             continue
         locked = lock_api_sports_program_item(
             raw_event_to_radar_program_item(item), phase="now24_api_football"
         )
-        if not locked or not is_in_next24_window(locked, log_checks=False):
+        if not locked:
+            fb_stats["drop_lock"] = fb_stats.get("drop_lock", 0) + 1
+            continue
+        if not is_in_next24_window(locked, log_checks=False):
+            fb_stats["drop_window"] = fb_stats.get("drop_window", 0) + 1
             continue
         if not passes_now24_football_threshold(
             item, locked, min_score=NOW24_FOOTBALL_MIN_WATCHABILITY
         ):
+            fb_stats["drop_score"] = fb_stats.get("drop_score", 0) + 1
             continue
         out.append(_prepare_now24_event(locked, item))
+        fb_stats["kept"] = fb_stats.get("kept", 0) + 1
 
+    hk_stats: dict[str, int] = {}
     out.extend(
         await _now24_filter_pool(
             hockey_raw,
             phase="now24_api_hockey",
-            min_watchability=32,
+            min_watchability=24,
+            stats=hk_stats,
         )
     )
+    bb_stats: dict[str, int] = {}
     out.extend(
         await _now24_filter_pool(
             basketball_raw,
             phase="now24_api_basketball",
-            min_watchability=32,
+            min_watchability=24,
+            stats=bb_stats,
         )
     )
+    f1_stats: dict[str, int] = {}
     out.extend(
         await _now24_filter_pool(
             f1_raw,
             phase="now24_api_f1",
-            min_watchability=38,
+            min_watchability=28,
+            stats=f1_stats,
         )
     )
+    es_stats: dict[str, int] = {}
     out.extend(
         await _now24_filter_pool(
             esports_raw,
             phase="now24_api_esports",
-            min_watchability=32,
+            min_watchability=24,
+            stats=es_stats,
         )
+    )
+
+    log.info(
+        "NOW24_FILTER football=%s hockey=%s basketball=%s f1=%s esports=%s",
+        fb_stats,
+        hk_stats,
+        bb_stats,
+        f1_stats,
+        es_stats,
     )
 
     from radar_dedupe import dedupe_events
@@ -170,12 +262,17 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from next24 import resolve_event_local_datetime_vn
-
     tz = ZoneInfo("Asia/Ho_Chi_Minh")
     out.sort(
         key=lambda x: resolve_event_local_datetime_vn(x)
         or datetime.max.replace(tzinfo=tz),
     )
     log.info("NOW24_API AFTER_DEDUPE=%s (exact keys, time-sorted)", len(out))
+    for e in out[:12]:
+        dt = resolve_event_local_datetime_vn(e)
+        log.info(
+            "NOW24 KEPT: %s | %s",
+            dt.isoformat() if dt else "?",
+            e.get("title"),
+        )
     return out
