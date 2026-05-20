@@ -46,8 +46,14 @@ def log_startup_banner() -> None:
         log.info("LOCAL MODE ACTIVE")
         log.info("=" * 60)
     log.info("RUN_MODE=%s", RUN_MODE)
-    if is_railway_run() and os.getenv("RUN_MODE", "").strip().lower() != "railway":
-        log.info("RUN_MODE auto-detected from Railway environment")
+    if is_railway_run():
+        if os.getenv("RUN_MODE", "").strip().lower() == "local":
+            log.warning(
+                "Variables содержат RUN_MODE=local — на Railway игнорируется, "
+                "используется railway (удалите RUN_MODE=local из Variables)"
+            )
+        elif os.getenv("RUN_MODE", "").strip().lower() != "railway":
+            log.info("RUN_MODE auto-detected from Railway environment")
     log.info("Project root: %s", _PROJECT_ROOT)
     log.info("Database: %s", DATABASE_PATH)
     log.info("Timezone: %s", TIMEZONE)

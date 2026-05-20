@@ -22,15 +22,24 @@ GEMINI_MODEL: str = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
 
 DATABASE_PATH: str = os.getenv("DATABASE_PATH", "gastrobar_bot.sqlite3").strip()
 
+def _on_railway_host() -> bool:
+    """Railway всегда выставляет эти переменные в контейнере."""
+    return bool(
+        os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("RAILWAY_PROJECT_ID")
+        or os.getenv("RAILWAY_SERVICE_ID")
+    )
+
+
 def _resolve_run_mode() -> str:
-    """local на ПК; railway — явно или автоматически на Railway."""
+    """На Railway — всегда railway (даже если в Variables ошибочно RUN_MODE=local)."""
+    if _on_railway_host():
+        return "railway"
     raw = os.getenv("RUN_MODE", "").strip().lower()
     if raw == "railway":
         return "railway"
     if raw == "local":
         return "local"
-    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
-        return "railway"
     return "local"
 
 

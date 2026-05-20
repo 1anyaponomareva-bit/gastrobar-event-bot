@@ -35,7 +35,9 @@ powershell -File scripts\kill_bot.ps1
 | `RADAR_WEEKLY_MAX` / `RADAR_MIN_WATCHABILITY` | по `.env.example` |
 | `GASTROBAR_TV_COUNT` | `2` |
 
-**`RUN_MODE`:** можно не задавать — на Railway включается автоматически (`RAILWAY_ENVIRONMENT`). Явно: `RUN_MODE=railway`.
+**`RUN_MODE`:** на Railway **не ставьте `local`** — бот уйдёт в «локальный» режим и будет конфликтовать с самим собой. Лучше: `RUN_MODE=railway` или вообще не задавать (авто по `RAILWAY_ENVIRONMENT`).
+
+**Один сервис:** в проекте должен работать **только один** worker с этим токеном. Если есть и `gastrobar`, и `gastrobar-event-bot` — остановите (Pause) лишний.
 
 Опционально: `GEMINI_MODEL=gemini-2.5-flash`, `DATABASE_PATH=/data/gastrobar_bot.sqlite3` (если подключён Volume, см. ниже).
 
