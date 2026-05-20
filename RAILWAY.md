@@ -61,6 +61,10 @@ powershell -File scripts\kill_bot.ps1
 
 Проверка в Telegram: `/start`, `/events`.
 
+### Ошибка «verification failed» при рабочем `/gemini_test`
+
+Это **не** обязательно проблема `GEMINI_API_KEY`: тест делает 1–2 вызова, а **афиша недели** гоняет цепочку поиска + **строгую проверку** каждого события. Для **футбола / UFC / части плей-офф NHL·NBA** без совпадения с **API-SPORTS** карточка может отбрасываться. Проверьте логи Railway: `rejected_unverified_event`, `verify_removed`, `Event Radar verify summary`. Убедитесь, что задан **`SPORTS_API_KEY`** и лимиты API-SPORTS/Gemini (free tier: не включайте **`RADAR_MULTI_SHARD`** без платного лимита).
+
 ## 5. SQLite на Railway (опционально)
 
 Без Volume база живёт на эфемерном диске и сбрасывается при redeploy. Для сохранения кэша афиши:

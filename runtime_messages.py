@@ -5,7 +5,7 @@ from __future__ import annotations
 from config import GEMINI_API_KEY, RUN_MODE, is_local_run, is_railway_run
 
 # Меняйте при деплое — по этой метке видно, какой код ответил в Telegram.
-BOT_BUILD_ID = "next24-chrono-mixed-rpl-20260521"
+BOT_BUILD_ID = "verification-msg-strict-gate-20260521"
 
 GEMINI_TROUBLESHOOT = (
     "Проверьте GEMINI_API_KEY через /check и посмотрите логи в терминале, "
@@ -18,7 +18,7 @@ _RADAR_REASON_RU: dict[str, str] = {
     "gemini_overloaded": "Gemini overloaded (503) — retry in 1–2 min",
     "timeout": "timeout",
     "no_candidates": "no candidates",
-    "verification_failed": "verification failed",
+    "verification_failed": "ни одно событие не прошло проверку (время / API / неделя)",
     "api_filter_empty": "API events dropped by filters (tier/score)",
     "unexpected_error": "unexpected error",
 }
@@ -47,6 +47,19 @@ def event_radar_error_message(reason: str) -> str:
             "⏳ Gemini временно перегружен (503). Ключ в порядке — подождите 1–2 минуты "
             "и нажмите «Обновить неделю».\n\n"
             f"{runtime_logs_hint()}"
+        )
+    elif reason == "verification_failed":
+        body = (
+            "Поиск (Gemini) отдал события, но **ни одно не прошло финальную проверку** — это "
+            "часто не про ключ.\n\n"
+            "Типично для **афиши недели**: футбол / MMA / еврокубки требуют совпадения с "
+            "**API-SPORTS** (ключ `SPORTS_API_KEY` и матч по дате/командам). Если матч не "
+            "нашёлся, карточка отбрасывается.\n\n"
+            "Ещё причины: дата **вне окна недели** (VN), жёсткий фильтр по времени бара.\n\n"
+            "**Free tier Gemini:** если в проекте включены несколько шардов поиска (`RADAR_MULTI_SHARD`), "
+            "может сработать лимит RPM — подождите 1–2 мин и нажмите «Обновить».\n\n"
+            f"{runtime_logs_hint()}\n"
+            "Там ищите строки `rejected_*`, `verify_removed`, `Event Radar verify summary`."
         )
     elif reason == "api_filter_empty":
         body = (

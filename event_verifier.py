@@ -869,7 +869,7 @@ def event_from_search_candidate(
     return out
 
 
-_verify_sem = asyncio.Semaphore(4)
+_verify_sem = asyncio.Semaphore(2)
 
 
 def _strict_second_verify_enabled() -> bool:
