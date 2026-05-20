@@ -7,20 +7,17 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from config import NOW24_FOOTBALL_MIN_WATCHABILITY, SPORTS_API_KEY
+from config import SPORTS_API_KEY
 from football_watchability import (
-    _UEFA_CUPS,
     football_watchability_score,
     is_eligible_football_league_now24,
-    passes_now24_football_threshold,
+    passes_gastrobar_football_threshold,
 )
+from gastrobar_event_filter import gastrobar_football_min_watchability
 from next24 import is_in_next24_window, log_next24_window_header, resolve_event_local_datetime_vn
 from radar_sports_convert import lock_api_sports_program_item
 from sports_events import (
-    _WORLD_HOCKEY_NATIONS,
-    _has_matchup_title,
-    _is_excluded_event,
-    _is_world_championship_hockey,
+    is_gastrobar_api_sport_worthy,
     raw_event_to_radar_program_item,
 )
 
@@ -28,51 +25,8 @@ log = logging.getLogger(__name__)
 
 
 def is_now24_api_sport_worthy(e: dict[str, Any]) -> bool:
-    """
-    Мягче weekly: для 24 ч нужны матчи сегодня/завтра (UEL, ЧМ по хоккею, NHL, KHL…).
-    """
-    if _is_excluded_event(e):
-        return False
-    sport = str(e.get("sport", "")).lower()
-    title = str(e.get("title", "")).strip()
-    league = str(e.get("league", "")).lower()
-
-    if sport == "football":
-        if not _has_matchup_title(title):
-            return False
-        if is_eligible_football_league_now24(e):
-            return True
-        try:
-            lid = int(e.get("league_id") or 0)
-        except (TypeError, ValueError):
-            lid = 0
-        if lid in _UEFA_CUPS:
-            return True
-        return False
-
-    if sport == "hockey":
-        if not _has_matchup_title(title):
-            return False
-        if _is_world_championship_hockey(e):
-            return True
-        if "nhl" in league or "stanley" in league or "khl" in league or "playoff" in league:
-            return True
-        if "world championship" in league or "iihf" in league:
-            return True
-        tl = title.lower()
-        nations = sum(1 for n in _WORLD_HOCKEY_NATIONS if n in tl)
-        return nations >= 2
-
-    if sport == "basketball":
-        return "nba" in league.lower() or "nba" in title.lower()
-
-    if sport in ("formula1", "f1"):
-        return True
-
-    if sport == "esports":
-        return bool(title) and len(title) >= 6
-
-    return False
+    """Алиас: тот же фильтр, что и для weekly API-пула."""
+    return is_gastrobar_api_sport_worthy(e)
 
 
 def _prepare_now24_event(locked: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
@@ -201,8 +155,8 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
         if not is_in_next24_window(locked, log_checks=False):
             fb_stats["drop_window"] = fb_stats.get("drop_window", 0) + 1
             continue
-        if not passes_now24_football_threshold(
-            item, locked, min_score=NOW24_FOOTBALL_MIN_WATCHABILITY
+        if not passes_gastrobar_football_threshold(
+            item, locked, min_score=gastrobar_football_min_watchability()
         ):
             fb_stats["drop_score"] = fb_stats.get("drop_score", 0) + 1
             continue

@@ -282,7 +282,7 @@ def football_watchability_score(
     return score, "+".join(reasons)
 
 
-def passes_now24_football_threshold(
+def passes_gastrobar_football_threshold(
     item: dict[str, Any],
     event: dict[str, Any] | None = None,
     *,
@@ -292,7 +292,7 @@ def passes_now24_football_threshold(
     ok = score >= min_score
     if not ok:
         log.info(
-            "now24 football skip: title=%r league_id=%s score=%s min=%s reason=%s",
+            "gastrobar football skip: title=%r league_id=%s score=%s min=%s reason=%s",
             (event or item).get("title"),
             item.get("league_id"),
             score,
@@ -300,3 +300,13 @@ def passes_now24_football_threshold(
             reason,
         )
     return ok
+
+
+def passes_now24_football_threshold(
+    item: dict[str, Any],
+    event: dict[str, Any] | None = None,
+    *,
+    min_score: int,
+) -> bool:
+    """Алиас для совместимости."""
+    return passes_gastrobar_football_threshold(item, event, min_score=min_score)

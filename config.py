@@ -127,6 +127,5 @@ RADAR_WEEKLY_TARGET_MIN: int = max(
 GASTROBAR_TV_COUNT: int = max(1, int(os.getenv("GASTROBAR_TV_COUNT", "2") or "2"))
 
 # Football now24: минимальный football_watchability_score (API-SPORTS)
-NOW24_FOOTBALL_MIN_WATCHABILITY: int = max(
-    24, int(os.getenv("NOW24_FOOTBALL_MIN_WATCHABILITY", "30") or "30")
-)
+# Устарело: футбол использует RADAR_MIN_WATCHABILITY (см. gastrobar_event_filter).
+NOW24_FOOTBALL_MIN_WATCHABILITY: int = RADAR_MIN_WATCHABILITY

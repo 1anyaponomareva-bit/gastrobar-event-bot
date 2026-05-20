@@ -977,72 +977,47 @@ def _expand_formula_api_item(item: dict[str, Any]) -> list[dict[str, Any]]:
     return unique
 
 
-def is_weekly_radar_api_worthy(e: dict[str, Any]) -> bool:
-    """Включить в weekly API-пул: топ-лиги, плей-офф, ЧМ по хоккею, F1-сессии."""
+def is_gastrobar_api_sport_worthy(e: dict[str, Any]) -> bool:
+    """Единый фильтр API-матчей для weekly, now24 и daily."""
     if _is_excluded_event(e):
         return False
     sport = str(e.get("sport", "")).lower()
     blob = _event_blob(e)
     title = str(e.get("title", ""))
+    league = str(e.get("league", "")).lower()
 
     if sport == "football":
         if not _has_matchup_title(title):
             return False
-        if e.get("league_id") is not None:
-            from football_watchability import (
-                _INTL_TOURNAMENTS,
-                _RPL_LEAGUE_ID,
-                _UEFA_CUPS,
-                _league_id,
-                football_watchability_score,
-                is_eligible_football_league_now24,
-            )
+        from football_watchability import _UEFA_CUPS, is_eligible_football_league_now24
 
-            lid = _league_id(e)
-            country = str(e.get("league_country") or "").strip().lower()
-            top_lids = {39, 140, 135, 78, 61, _RPL_LEAGUE_ID} | set(_UEFA_CUPS) | set(
-                _INTL_TOURNAMENTS
-            )
-            if lid == _CHAMPIONSHIP_ENGLAND_LEAGUE_ID and country == "england":
-                return True
-            if lid == _RPL_LEAGUE_ID and country == "russia":
-                return True
-            if lid in _WEEKLY_UEFA_LEAGUE_IDS | set(_UEFA_CUPS):
-                return True
-            if lid in {39, 140, 135, 78, 61}:
-                return True
-            if lid in top_lids:
-                if not is_eligible_football_league_now24(e):
-                    return False
-                score, reason = football_watchability_score(e, None)
-                if score == 0 and reason == "uefa_no_top_club":
-                    from watchability import _football_watchability
-
-                    score, _ = _football_watchability(blob, title)
-                if score >= WEEKLY_FOOTBALL_MIN_WATCHABILITY:
-                    return True
-                if re.search(
-                    r"matchday\s+\d+|round\s+\d+|final\s+day|semi|quarter|play.?off",
-                    blob,
-                    re.I,
-                ) and score >= 14:
-                    return True
-            return False
-        return _is_priority_event(e)
+        if is_eligible_football_league_now24(e):
+            return True
+        try:
+            lid = int(e.get("league_id") or 0)
+        except (TypeError, ValueError):
+            lid = 0
+        if lid in _UEFA_CUPS:
+            return True
+        return False
 
     if sport == "hockey":
         if not _has_matchup_title(title):
             return False
         if _is_world_championship_hockey(e):
             return True
-        ll = (e.get("league") or "").lower()
-        if "nhl" in ll or "stanley" in ll or "playoff" in ll:
+        if (
+            "nhl" in league
+            or "stanley" in league
+            or "khl" in league
+            or "playoff" in league
+        ):
             return True
-        if "world championship" in ll or "iihf" in ll:
+        if "world championship" in league or "iihf" in league:
             return True
-        if "khl" in ll:
-            return True
-        return False
+        tl = title.lower()
+        nations = sum(1 for n in _WORLD_HOCKEY_NATIONS if n in tl)
+        return nations >= 2
 
     if sport == "basketball":
         if "nba" not in blob:
@@ -1078,6 +1053,11 @@ def is_weekly_radar_api_worthy(e: dict[str, Any]) -> bool:
         return _is_priority_event(e) and _has_matchup_title(title)
 
     return _is_priority_event(e)
+
+
+def is_weekly_radar_api_worthy(e: dict[str, Any]) -> bool:
+    """Алиас: weekly и daily используют один API-фильтр."""
+    return is_gastrobar_api_sport_worthy(e)
 
 
 def raw_event_to_radar_program_item(e: dict[str, Any]) -> dict[str, Any]:
@@ -1133,7 +1113,7 @@ def build_weekly_radar_api_pool(merged: list[dict[str, Any]]) -> list[dict[str, 
     }
 
     for e in merged:
-        if not is_weekly_radar_api_worthy(e):
+        if not is_gastrobar_api_sport_worthy(e):
             continue
         stats["worthy"] += 1
         sp = str(e.get("sport", "")).lower()

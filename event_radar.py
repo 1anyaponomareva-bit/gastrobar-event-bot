@@ -999,15 +999,27 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
         stats.removed(str(e.get("title", "")), "missing_datetime")
     stats.set("AFTER_TIME_LOCK", len(timed))
 
-    eligible: list[dict[str, Any]] = []
+    from gastrobar_event_filter import (
+        passes_gastrobar_content_filters,
+        passes_gastrobar_watchability_floor,
+    )
+
+    content_ok: list[dict[str, Any]] = []
     for e in timed:
-        floor = min_watchability_for_event(e, default_min=RADAR_MIN_WATCHABILITY)
-        score = int(e.get("watchability_score", 0))
-        if score >= floor:
-            eligible.append(e)
-        elif is_major_weekly_event(e) and score >= max(16, floor - 16):
+        ok, ev = passes_gastrobar_content_filters(e, enrich=False)
+        if ok:
+            content_ok.append(ev)
+        else:
+            stats.removed(str(e.get("title", "")), "gastrobar_content_filter")
+    stats.set("AFTER_CONTENT_FILTER", len(content_ok))
+
+    eligible: list[dict[str, Any]] = []
+    for e in content_ok:
+        if passes_gastrobar_watchability_floor(e):
             eligible.append(e)
         else:
+            score = int(e.get("watchability_score", 0))
+            floor = min_watchability_for_event(e, default_min=RADAR_MIN_WATCHABILITY)
             stats.removed(
                 str(e.get("title", "")),
                 f"score_too_low score={score} floor={floor}",
