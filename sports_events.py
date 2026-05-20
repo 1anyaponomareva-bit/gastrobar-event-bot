@@ -991,6 +991,7 @@ def is_weekly_radar_api_worthy(e: dict[str, Any]) -> bool:
         if e.get("league_id") is not None:
             from football_watchability import (
                 _INTL_TOURNAMENTS,
+                _RPL_LEAGUE_ID,
                 _UEFA_CUPS,
                 _league_id,
                 football_watchability_score,
@@ -999,8 +1000,12 @@ def is_weekly_radar_api_worthy(e: dict[str, Any]) -> bool:
 
             lid = _league_id(e)
             country = str(e.get("league_country") or "").strip().lower()
-            top_lids = {39, 140, 135, 78, 61} | set(_UEFA_CUPS) | set(_INTL_TOURNAMENTS)
+            top_lids = {39, 140, 135, 78, 61, _RPL_LEAGUE_ID} | set(_UEFA_CUPS) | set(
+                _INTL_TOURNAMENTS
+            )
             if lid == _CHAMPIONSHIP_ENGLAND_LEAGUE_ID and country == "england":
+                return True
+            if lid == _RPL_LEAGUE_ID and country == "russia":
                 return True
             if lid in _WEEKLY_UEFA_LEAGUE_IDS | set(_UEFA_CUPS):
                 return True
