@@ -1211,7 +1211,7 @@ async def _fetch_radar_pipeline(
             len(pool),
         )
         final_pre = _finalize_week_selection(pool, [])
-        return final_pre, api_raw, api_raw, len(final_pre), fetch_note
+        return final_pre, api_raw, [], fetch_note
 
     if fetch_note == "gemini_quota":
         fallback, fb_raw = await _fallback_events_from_sports_api()
