@@ -34,7 +34,7 @@ powershell -File scripts\kill_bot.ps1
 | `GEMINI_API_KEY` | да |
 | `ADMIN_ID` | да (планировщик daily/weekly) |
 | `GASTROBAR_GROUP_ID` | да (публикация в группу) |
-| `SPORTS_API_KEY` | да (футбол API-SPORTS) |
+| `SPORTS_API_KEY` | да — **один ключ** от [dashboard.api-football.com](https://dashboard.api-football.com/) (Football API). Для хоккея/NBA/F1 нужны права подписки или отдельные планы; если ключа нет в Variables, бот видит **пустой** API. |
 | `EXPECTED_BOT_USERNAME` | `gastrobar_nhatrang_bot` |
 | `TIMEZONE` | `Asia/Ho_Chi_Minh` |
 | `BAR_OPEN_TIME` / `BAR_CLOSE_TIME` | по желанию |

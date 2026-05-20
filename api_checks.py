@@ -74,9 +74,28 @@ async def check_sports_api() -> CheckResult:
             return CheckResult(name="API-SPORTS", ok=False, details=msg)
 
         data: dict[str, Any] = r.json()
+        api_errors = data.get("errors")
+        if api_errors:
+            err_msg = str(api_errors)[:400]
+            log.error("API-SPORTS errors payload: %s", err_msg)
+            return CheckResult(
+                name="API-SPORTS",
+                ok=False,
+                details=f"errors из ответа API: {err_msg}",
+            )
+
         resp = data.get("response") or []
-        if not isinstance(resp, list) or not resp:
-            msg = "пустой response"
+        results_hint = data.get("results")
+        paging_info = data.get("paging")
+
+        if not isinstance(resp, list):
+            msg = f"response не список: keys={list(data.keys())}"
+            log.warning("API-SPORTS error: %s", msg)
+            return CheckResult(name="API-SPORTS", ok=False, details=msg)
+
+        if not resp:
+            extra = f"results={results_hint} paging={paging_info}"
+            msg = f"пустой fixtures (план/лимит ключа). {extra}"
             log.warning("API-SPORTS error: %s", msg)
             return CheckResult(name="API-SPORTS", ok=False, details=msg)
 

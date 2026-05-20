@@ -21,6 +21,7 @@ from config import (
     DATABASE_PATH,
     GEMINI_API_KEY,
     RUN_MODE,
+    SPORTS_API_KEY,
     TELEGRAM_BOT_TOKEN,
     TIMEZONE,
     is_local_run,
@@ -59,6 +60,7 @@ def log_startup_banner() -> None:
     log.info("Timezone: %s", TIMEZONE)
     log.info("Token loaded: %s", "yes" if TELEGRAM_BOT_TOKEN else "no")
     log.info("GEMINI_API_KEY loaded: %s", "yes" if GEMINI_API_KEY else "no")
+    log.info("SPORTS_API_KEY loaded: %s", "yes" if SPORTS_API_KEY else "no")
     log.info("GEMINI_MODEL: %s", effective_gemini_model())
     if is_railway_run():
         log.info(
@@ -68,6 +70,10 @@ def log_startup_banner() -> None:
         )
     if not GEMINI_API_KEY:
         log.warning("GEMINI_API_KEY пуст — /events и radar не будут работать")
+    if not SPORTS_API_KEY:
+        log.warning(
+            "SPORTS_API_KEY пуст — API-SPORTS выключен: афиша только из Gemini/кэша или заглушки"
+        )
     if not ADMIN_ID:
         log.warning("ADMIN_ID не задан — планировщик weekly/daily отключён")
 
