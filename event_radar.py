@@ -23,6 +23,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from bar_hours import filter_events_for_bar_hours, is_f1_excluded_event
 from config import (
     GEMINI_API_KEY,
+    RADAR_API_FIRST,
+    RADAR_API_MIN_SEED,
     RADAR_MIN_WATCHABILITY,
     RADAR_WEEKLY_MAX,
     RADAR_WEEKLY_TARGET_MIN,
@@ -1020,47 +1022,26 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
     out: list[dict[str, Any]] = []
     seen_out: set[tuple[str, str, str]] = set()
 
-    def _take(bucket: list[dict[str, Any]], *, limit: int | None = None) -> None:
-        n = 0
+    def _take(bucket: list[dict[str, Any]]) -> None:
         for e in bucket:
-            if len(out) >= RADAR_WEEKLY_MAX:
-                return
-            if limit is not None and n >= limit:
-                return
             k = radar_dedupe_key(e)
             if k in seen_out:
                 continue
             seen_out.add(k)
             out.append(e)
-            n += 1
 
     _take(f1)
-    _take([e for e in nba if is_major_weekly_event(e)])
-    _take([e for e in nba if not is_major_weekly_event(e)])
-    _take([e for e in nhl if is_major_weekly_event(e)])
-    _take([e for e in nhl if not is_major_weekly_event(e)])
+    _take(nba)
+    _take(nhl)
     _take(football)
     _take(live)
     _take(other)
 
-    if len(out) < RADAR_WEEKLY_MAX:
-        backfill_pool = sorted(
-            [e for e in deduped if radar_dedupe_key(e) not in seen_out],
-            key=_watchability_sort_key,
-        )
-        for e in backfill_pool:
-            if len(out) >= RADAR_WEEKLY_MAX:
-                break
-            k = radar_dedupe_key(e)
-            if k in seen_out:
-                continue
-            seen_out.add(k)
-            out.append(e)
-            log.info(
-                "weekly backfill: title=%r watchability=%s",
-                e.get("title"),
-                e.get("watchability_score"),
-            )
+    backfill_pool = sorted(
+        [e for e in deduped if radar_dedupe_key(e) not in seen_out],
+        key=_watchability_sort_key,
+    )
+    _take(backfill_pool)
 
     for e in out:
         log.info(
@@ -1075,17 +1056,19 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
         )
 
     out.sort(key=sort_key_verified)
+    out.sort(key=_watchability_sort_key)
     log.info(
         "weekly radar selection: prepared=%s eligible=%s deduped=%s selected=%s "
-        "f1=%s nba=%s football=%s cap=%s",
+        "f1=%s nba=%s nhl=%s football=%s (no hard cap, min_watchability=%s)",
         len(prepared),
         len(eligible),
         len(deduped),
         len(out),
         len(f1),
         len(nba),
+        len(nhl),
         len(football),
-        RADAR_WEEKLY_MAX,
+        RADAR_MIN_WATCHABILITY,
     )
     return out
 
@@ -1108,18 +1091,14 @@ async def _lock_events_from_sports_program(
 ) -> list[dict[str, Any]]:
     from locked_time import lock_event_schedule
     from radar_current_week import filter_radar_events
-    from radar_sports_convert import lock_football_fixture_event
+    from radar_sports_convert import lock_api_sports_program_item
 
     locked: list[dict[str, Any]] = []
     for item in program:
         ev = _program_item_to_radar_event(item)
         if not ev or gastrobar_hard_reject(ev):
             continue
-        le = None
-        if str(item.get("fixture_utc_iso") or "").strip():
-            le = lock_football_fixture_event(item, phase=phase)
-        if le is None:
-            le = lock_event_schedule(ev, phase=phase)
+        le = lock_api_sports_program_item(item, phase=phase)
         if le:
             le["verification_reason"] = "api_sports_match"
             le["source_verified"] = True
@@ -1130,18 +1109,19 @@ async def _lock_events_from_sports_program(
 
 
 async def _api_sports_weekly_seed() -> tuple[list[dict[str, Any]], int]:
-    """Источник истины: API-SPORTS на текущую неделю (футбол и др.)."""
+    """API-first: футбол, хоккей, NBA, F1 — полный пул недели без top-6 editor cap."""
     if not SPORTS_API_KEY:
         return [], 0
-    from sports_events import get_week_events_with_stats
+    from sports_events import get_week_radar_pool_with_stats
 
-    program, raw_total, _ = await get_week_events_with_stats()
+    program, raw_total, _ = await get_week_radar_pool_with_stats()
     if not program:
         return [], raw_total
     locked = await _lock_events_from_sports_program(program, phase="api_weekly_seed")
     log.info(
-        "Event Radar API weekly seed: raw_api=%s locked=%s",
+        "Event Radar API weekly seed: raw_api=%s pool=%s locked=%s",
         raw_total,
+        len(program),
         len(locked),
     )
     return locked, raw_total
@@ -1173,10 +1153,27 @@ async def _fetch_radar_pipeline(
     clear_fetch_cache()
     api_seed, api_raw = await _api_sports_weekly_seed()
 
-    prelim, raw_total, fetch_note = await asyncio.to_thread(
-        fetch_radar_multi_search_sync, force_gemini=force_gemini
+    prelim: list[dict[str, Any]] = []
+    gemini_raw = 0
+    fetch_note: str | None = None
+
+    skip_gemini = (
+        RADAR_API_FIRST
+        and len(api_seed) >= RADAR_API_MIN_SEED
+        and not force_gemini
     )
-    raw_total = max(raw_total, api_raw)
+    if skip_gemini:
+        log.info(
+            "Event Radar: API-first — skip Gemini (api_seed=%s, min=%s)",
+            len(api_seed),
+            RADAR_API_MIN_SEED,
+        )
+        fetch_note = "api_first"
+    else:
+        prelim, gemini_raw, fetch_note = await asyncio.to_thread(
+            fetch_radar_multi_search_sync, force_gemini=force_gemini
+        )
+    raw_total = max(api_raw, gemini_raw)
 
     if fetch_note == "gemini_quota":
         fallback, fb_raw = await _fallback_events_from_sports_api()
@@ -1333,7 +1330,7 @@ async def get_event_radar_week(
     if not force_refresh:
         if await weekly_cache_updated_today_vn():
             cached = await get_weekly_events_cache_for_display()
-            if cached:
+            if cached and len(cached) >= RADAR_API_MIN_SEED:
                 log.info("Event Radar week: cache today (%s events)", len(cached))
                 return (
                     cached,
@@ -1341,6 +1338,11 @@ async def get_event_radar_week(
                     len(cached),
                     len(cached),
                     "weekly_cache_today",
+                )
+            if cached:
+                log.info(
+                    "Event Radar week: thin cache today (%s) — refetch API pool",
+                    len(cached),
                 )
 
     if not force_refresh and await should_skip_gemini_discovery():
@@ -1358,10 +1360,7 @@ async def get_event_radar_week(
     pool, raw_total, prelim, fetch_note = await _fetch_radar_pipeline(
         force_gemini=force_refresh
     )
-    if fetch_note == "sports_fallback":
-        final = pool[:RADAR_MAX_ITEMS]
-    else:
-        final = _finalize_week_selection(pool, prelim)
+    final = _finalize_week_selection(pool, prelim)
     log.info("Event Radar week final=%s note=%s", len(final), fetch_note)
 
     if not final and fetch_note in ("gemini_quota", "gemini_error", "gemini_overloaded"):

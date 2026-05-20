@@ -254,10 +254,25 @@ _EXCLUDE_KEYWORDS = (
     "regular season",
 )
 
-_TOP_EPL = ("manchester city", "liverpool", "arsenal")
-_TOP_LALIGA = ("real madrid", "barcelona", "atletico")
-_TOP_BUNDES = ("bayern", "dortmund")
-_TOP_SERIEA = ("inter", "milan", "juventus", "napoli")
+_TOP_EPL = (
+    "manchester city",
+    "man city",
+    "manchester united",
+    "man united",
+    "liverpool",
+    "arsenal",
+    "chelsea",
+    "tottenham",
+    "spurs",
+    "newcastle",
+    "aston villa",
+    "west ham",
+    "brighton",
+    "bournemouth",
+)
+_TOP_LALIGA = ("real madrid", "barcelona", "atletico", "atletico madrid")
+_TOP_BUNDES = ("bayern", "dortmund", "leipzig", "leverkusen")
+_TOP_SERIEA = ("inter", "ac milan", "milan", "juventus", "napoli", "roma", "atalanta")
 _TOP_NBA = (
     "lakers",
     "celtics",
@@ -345,13 +360,22 @@ def _is_priority_event(e: dict[str, Any]) -> bool:
             return True
         if "fifa world cup" in blob or "uefa euro" in blob:
             return True
-        if "premier league" in blob and _contains_any(blob, _TOP_EPL):
-            return True
+        if "premier league" in blob:
+            if _contains_any(blob, _TOP_EPL):
+                return True
+            if re.search(r"matchday\s+38|round\s+38|final\s+day", blob):
+                return True
         if ("la liga" in blob or "laliga" in blob) and _contains_any(blob, _TOP_LALIGA):
             return True
         if "bundesliga" in blob and _contains_any(blob, _TOP_BUNDES):
             return True
         if "serie a" in blob and _contains_any(blob, _TOP_SERIEA):
+            return True
+        if "ligue 1" in blob and _contains_any(
+            blob, ("psg", "paris", "marseille", "lyon", "monaco")
+        ):
+            return True
+        if _is_top_clash(blob):
             return True
         return False
 
@@ -363,7 +387,11 @@ def _is_priority_event(e: dict[str, Any]) -> bool:
         return _contains_any(blob, _TOP_NBA)
 
     if sport == "hockey":
-        return "nhl" in blob and ("playoffs" in blob or "stanley cup" in blob)
+        if "nhl" in blob and ("playoffs" in blob or "stanley cup" in blob):
+            return True
+        if _is_world_championship_hockey(e):
+            return True
+        return False
 
     if sport == "formula1":
         return ("formula 1" in blob) or ("grand prix" in blob) or ("qualifying" in blob) or ("race" in blob)
@@ -759,6 +787,198 @@ def build_gastrobar_weekly_program(
         out.append(_match_item_from_football(e, "high"))
 
     return out[:AFISHA_MAX_ITEMS]
+
+
+# --- Weekly Event Radar: полный API-пул (без лимита 6 и без block-заглушек) ---
+
+WEEKLY_FOOTBALL_MIN_WATCHABILITY = 42
+
+_WORLD_HOCKEY_NATIONS = (
+    "canada",
+    "usa",
+    "united states",
+    "finland",
+    "sweden",
+    "czech",
+    "czechia",
+    "italy",
+    "switzerland",
+    "germany",
+    "latvia",
+    "slovakia",
+    "norway",
+    "denmark",
+    "france",
+    "austria",
+)
+
+
+def _is_world_championship_hockey(e: dict[str, Any]) -> bool:
+    blob = _event_blob(e)
+    if str(e.get("sport", "")).lower() != "hockey":
+        return False
+    if re.search(
+        r"world\s+championship|iihf|world\s+cup.*hockey|championship.*hockey",
+        blob,
+        re.I,
+    ):
+        return True
+    title = str(e.get("title", "")).lower()
+    if not re.search(r"\s+vs\.?\s+|\s+—\s+|\s+–\s+", title):
+        return False
+    nations = sum(1 for n in _WORLD_HOCKEY_NATIONS if n in title or n in blob)
+    return nations >= 1
+
+
+def _has_matchup_title(title: str) -> bool:
+    return bool(
+        re.search(r"\s+vs\.?\s+|\s+—\s+|\s+–\s+", str(title or ""), flags=re.I)
+    )
+
+
+def is_weekly_radar_api_worthy(e: dict[str, Any]) -> bool:
+    """Включить в weekly API-пул: топ-лиги, плей-офф, ЧМ по хоккею, F1-сессии."""
+    if _is_excluded_event(e):
+        return False
+    sport = str(e.get("sport", "")).lower()
+    blob = _event_blob(e)
+    title = str(e.get("title", ""))
+
+    if sport == "football":
+        if e.get("league_id") is not None:
+            from football_watchability import (
+                football_watchability_score,
+                is_eligible_football_league_now24,
+            )
+
+            if not is_eligible_football_league_now24(e):
+                return False
+            score, reason = football_watchability_score(e, None)
+            if score == 0 and reason == "uefa_no_top_club":
+                from watchability import _football_watchability
+
+                score, _ = _football_watchability(blob, title)
+            if score >= WEEKLY_FOOTBALL_MIN_WATCHABILITY:
+                return True
+            if re.search(r"matchday\s+38|round\s+38|final\s+day", blob) and score >= 36:
+                return True
+            return False
+        return _is_priority_event(e)
+
+    if sport == "hockey":
+        if _is_world_championship_hockey(e) and _has_matchup_title(title):
+            return True
+        if "nhl" in blob and ("playoff" in blob or "stanley" in blob):
+            return _has_matchup_title(title)
+        return False
+
+    if sport == "basketball":
+        if "nba" not in blob:
+            return False
+        if "regular season" in blob and "playoff" not in blob and "finals" not in blob:
+            return False
+        if "playoff" in blob or "finals" in blob or "final four" in blob:
+            return _has_matchup_title(title)
+        return _contains_any(blob, _TOP_NBA) and _has_matchup_title(title)
+
+    if sport == "formula1":
+        if re.search(r"\bpractice\b|\bfp[123]\b|free\s+practice", blob):
+            return False
+        return bool(title.strip())
+
+    if sport == "mma":
+        return "ufc" in blob and _has_matchup_title(title)
+
+    if sport == "boxing":
+        return _is_priority_event(e) and _has_matchup_title(title)
+
+    return _is_priority_event(e)
+
+
+def raw_event_to_radar_program_item(e: dict[str, Any]) -> dict[str, Any]:
+    """Плоский match-item для radar (не editor block)."""
+    sport = str(e.get("sport", "misc")).lower()
+    league_raw = _clean_league_name(str(e.get("league", "")))
+    title = _pretty_match_title(str(e.get("title", "")))
+    tier = str(e.get("importance", "medium")).lower()
+    if tier not in ("high", "medium", "low"):
+        tier = "medium"
+    emoji_by_sport = {
+        "football": "⚽",
+        "hockey": "🏒",
+        "basketball": "🏀",
+        "formula1": "🏎",
+        "mma": "🥊",
+        "boxing": "🥊",
+    }
+    item: dict[str, Any] = {
+        "kind": "match",
+        "sport": sport,
+        "title": title,
+        "league_label_ru": _league_label_ru(league_raw) if sport == "football" else league_raw,
+        "league_raw": league_raw,
+        "date": str(e.get("date", "")),
+        "time": str(e.get("time", "")),
+        "tier": "high" if tier == "high" else "medium",
+        "emoji": emoji_by_sport.get(sport, "🏟"),
+    }
+    iso = str(e.get("fixture_utc_iso") or "").strip()
+    if iso:
+        item["fixture_utc_iso"] = iso
+    if e.get("league_id") is not None:
+        item["league_id"] = e.get("league_id")
+    if e.get("league_country"):
+        item["league_country"] = e.get("league_country")
+    return item
+
+
+def build_weekly_radar_api_pool(merged: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Все API-матчи недели, прошедшие gastrobar-фильтр (без top-N)."""
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    stats = {"raw": len(merged), "worthy": 0, "football": 0, "hockey": 0, "nba": 0, "f1": 0}
+
+    for e in merged:
+        if not is_weekly_radar_api_worthy(e):
+            continue
+        stats["worthy"] += 1
+        sp = str(e.get("sport", "")).lower()
+        if sp == "football":
+            stats["football"] += 1
+        elif sp == "hockey":
+            stats["hockey"] += 1
+        elif sp == "basketball":
+            stats["nba"] += 1
+        elif sp == "formula1":
+            stats["f1"] += 1
+        key = (str(e.get("date", "")), str(e.get("time", "")), str(e.get("title", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(raw_event_to_radar_program_item(e))
+
+    out.sort(
+        key=lambda x: (
+            str(x.get("date", "")),
+            str(x.get("time", "")),
+            str(x.get("sport", "")),
+        )
+    )
+    log.info(
+        "weekly radar API pool: raw=%s worthy=%s items=%s stats=%s",
+        stats["raw"],
+        stats["worthy"],
+        len(out),
+        stats,
+    )
+    return out
+
+
+async def get_week_radar_pool_with_stats() -> tuple[list[dict[str, Any]], int, int]:
+    """Полный API-пул для Event Radar week (не редакторская программа на 6 пунктов)."""
+    merged = await _merge_raw_week_events()
+    pool = build_weekly_radar_api_pool(merged)
+    return pool, len(merged), len(pool)
 
 
 def editor_program_to_legacy_events(

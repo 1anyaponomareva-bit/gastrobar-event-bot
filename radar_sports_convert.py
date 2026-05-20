@@ -23,6 +23,16 @@ def _normalize_hhmm(raw: str) -> str | None:
     return norm
 
 
+_SPORT_CATEGORY = {
+    "football": ("FOOTBALL", "⚽"),
+    "hockey": ("HOCKEY", "🏒"),
+    "basketball": ("BASKETBALL", "🏀"),
+    "formula1": ("SPORTS", "🏎"),
+    "mma": ("SPORTS", "🥊"),
+    "boxing": ("SPORTS", "🥊"),
+}
+
+
 def program_item_to_radar_event(item: dict[str, Any]) -> dict[str, Any] | None:
     if item.get("kind") == "block":
         d_obj = date.today()
@@ -59,16 +69,19 @@ def program_item_to_radar_event(item: dict[str, Any]) -> dict[str, Any] | None:
         return None
     subtitle = str(item.get("league_label_ru", item.get("league_raw", item.get("league", "")))).strip()
     tier = str(item.get("tier", "high")).lower()
+    sport = str(item.get("sport", "football")).lower()
+    cat, default_emoji = _SPORT_CATEGORY.get(sport, ("SPORTS", "🏟"))
+    emoji = str(item.get("emoji", default_emoji)).strip() or default_emoji
     ev: dict[str, Any] = {
         "date": date_s,
         "time": time_s,
         "weekday": _weekday_ru_for_date(d_obj),
-        "category": "FOOTBALL",
+        "category": cat,
         "title": title,
         "subtitle": subtitle,
         "league": subtitle,
-        "why": "Подборка API-SPORTS (резерв без Gemini)",
-        "emoji": "⚽",
+        "why": "API-SPORTS weekly pool",
+        "emoji": emoji,
         "original_date": date_s,
         "original_time": time_s,
         "verified_via": "API-SPORTS",
@@ -110,3 +123,19 @@ def lock_football_fixture_event(
     from locked_time import lock_event_from_api_utc_iso
 
     return lock_event_from_api_utc_iso(ev, iso, phase=phase)
+
+
+def lock_api_sports_program_item(
+    item: dict[str, Any],
+    *,
+    phase: str = "api_sports",
+) -> dict[str, Any] | None:
+    """Football — UTC fixture; остальные виды — lock по локальному date/time."""
+    if str(item.get("fixture_utc_iso") or "").strip():
+        return lock_football_fixture_event(item, phase=phase)
+    ev = program_item_to_radar_event(item)
+    if not ev:
+        return None
+    from locked_time import lock_event_schedule
+
+    return lock_event_schedule(ev, phase=phase)

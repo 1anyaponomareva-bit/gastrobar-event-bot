@@ -109,9 +109,6 @@ async def fetch_week_events_for_daily() -> list[dict[str, Any]]:
     return [_prepare_for_afisha_selection(dict(e)) for e in filtered]
 
 
-NOW24_MAX_ITEMS = 4
-
-
 def select_now24_events(
     events: list[dict[str, Any]] | None = None,
     *,
@@ -179,6 +176,8 @@ def select_now24_events(
             event_start_datetime_vn(x) or datetime.max.replace(tzinfo=TZ),
         )
     )
+    from config import NOW24_MAX_ITEMS
+
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
     for e in candidates:
@@ -194,10 +193,7 @@ def select_now24_events(
         seen.add(key)
         out.append(e)
 
-    from daily_tv import apply_tv_limit_for_digest
-
-    limited, _ = apply_tv_limit_for_digest(out)
-    return limited
+    return out
 
 
 def collect_campaign_events(
