@@ -1,10 +1,11 @@
 """
-Dispatcher, который не крутит бесконечный backoff при TelegramConflictError:
-другой клиент уже держит getUpdates — выходим сразу (fail-fast, без бесконечного retry).
+Dispatcher при TelegramConflictError: локально — короткий retry; на Railway — длинный retry
+перед выходом (при деплое старый контейнер временно держит getUpdates).
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
@@ -15,41 +16,72 @@ from aiogram.exceptions import TelegramConflictError
 from aiogram.methods import GetUpdates
 from aiogram.utils.backoff import Backoff, BackoffConfig
 
-from config import is_local_run
+from config import is_local_run, is_railway_run
 
-# Короткое ожидание: при деплое Railway не долбить getUpdates минутами.
+# Локально — короткое ожидание (локальный второй процесс нужно явно закрыть).
 _LOCAL_CONFLICT_RETRIES = 3
 _LOCAL_CONFLICT_WAIT_SEC = 5.0
+
+# Railway: пока деплоится новый контейнер, старый ещё держит getUpdates — ждём отпускания.
+try:
+    _RAILWAY_CONFLICT_RETRIES = max(12, int(os.getenv("RAILWAY_CONFLICT_RETRIES", "40") or "40"))
+except ValueError:
+    _RAILWAY_CONFLICT_RETRIES = 40
+try:
+    _RAILWAY_CONFLICT_WAIT_SEC = float(os.getenv("RAILWAY_CONFLICT_WAIT_SEC", "5") or "5")
+except ValueError:
+    _RAILWAY_CONFLICT_WAIT_SEC = 5.0
 
 if TYPE_CHECKING:
     from aiogram.client.bot import Bot
     from aiogram.types import Update
 
 
+def _poll_conflict_retry_budget() -> tuple[int, float, str]:
+    """Сколько раз ждать TelegramConflict перед жёстким выходом."""
+    if is_railway_run():
+        return (
+            _RAILWAY_CONFLICT_RETRIES,
+            max(2.0, _RAILWAY_CONFLICT_WAIT_SEC),
+            "railway_deploy",
+        )
+    if is_local_run():
+        return _LOCAL_CONFLICT_RETRIES, _LOCAL_CONFLICT_WAIT_SEC, "local"
+    return _LOCAL_CONFLICT_RETRIES, _LOCAL_CONFLICT_WAIT_SEC, "other"
+
+
 def _exit_on_conflict(context: str) -> None:
     loggers.dispatcher.error(
-        "%s: TelegramConflictError — другой клиент уже вызывает getUpdates "
-        "(второй экземпляр main.py, webhook или другой deployment). "
-        "Процесс завершается без retry.",
+        "%s: TelegramConflictError после всех попыток — второй клиент getUpdates.",
         context,
     )
     from conflict_notify import send_conflict_telegram_once
 
     send_conflict_telegram_once()
-    print(
-        "\n"
-        "=" * 62 + "\n"
-        "  TelegramConflictError — локальный бот НЕ работает\n"
-        "=" * 62 + "\n"
-        "Drugoj ekzemplyar uzhe oprashivaet Telegram.\n\n"
-        "1. Zakroyte VSE okna start_bot.bat\n"
-        "2. scripts\\list_bot_processes.ps1\n"
-        "3. Esli Conflict: BotFather -> Revoke -> novyj token v .env\n"
-        "4. start_bot.bat\n",
-        file=sys.stderr,
-    )
-    import os
-
+    if is_railway_run():
+        print(
+            "\n"
+            + "=" * 62
+            + "\n"
+            + "  TelegramConflictError on Railway — still another getUpdates client.\n"
+            + "  Check: duplicate Railway service / local main.py.\n"
+            + "=" * 62
+            + "\n",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "\n"
+            "=" * 62 + "\n"
+            "  TelegramConflictError — локальный бот НЕ работает\n"
+            "=" * 62 + "\n"
+            "Drugoj ekzemplyar uzhe oprashivaet Telegram.\n\n"
+            "1. Zakroyte VSE okna start_bot.bat\n"
+            "2. scripts\\list_bot_processes.ps1\n"
+            "3. Esli Conflict: BotFather -> Revoke -> novyj token v .env\n"
+            "4. start_bot.bat\n",
+            file=sys.stderr,
+        )
     os._exit(1)
 
 
@@ -76,17 +108,25 @@ class FatalConflictDispatcher(Dispatcher):
                 updates = await bot(get_updates, **kwargs)
                 conflict_attempt = 0
             except TelegramConflictError:
-                if is_local_run() and conflict_attempt < _LOCAL_CONFLICT_RETRIES:
+                max_retries, wait_sec, bucket = _poll_conflict_retry_budget()
+                if conflict_attempt < max_retries:
                     conflict_attempt += 1
+                    hint = (
+                        "пересечение деплоев / старый контейнер"
+                        if bucket == "railway_deploy"
+                        else "другой клиент должен закрыться"
+                    )
                     loggers.dispatcher.warning(
-                        "listen_updates: conflict %s/%s — ждём %.0fs (другой клиент отпустит getUpdates)",
+                        "listen_updates: conflict %s/%s [%s] — ждём %.0fs (%s)",
                         conflict_attempt,
-                        _LOCAL_CONFLICT_RETRIES,
-                        _LOCAL_CONFLICT_WAIT_SEC,
+                        max_retries,
+                        bucket,
+                        wait_sec,
+                        hint,
                     )
                     import asyncio
 
-                    await asyncio.sleep(_LOCAL_CONFLICT_WAIT_SEC)
+                    await asyncio.sleep(wait_sec)
                     continue
                 _exit_on_conflict("listen_updates")
             except Exception as e:  # noqa: BLE001

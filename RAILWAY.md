@@ -45,6 +45,8 @@ powershell -File scripts\kill_bot.ps1
 
 **`RUN_MODE`:** на Railway **не ставьте `local`** — бот уйдёт в «локальный» режим и будет конфликтовать с самим собой. Лучше: `RUN_MODE=railway` или вообще не задавать (авто по `RAILWAY_ENVIRONMENT`).
 
+**Деплой и `TelegramConflict`:** при перезапуске контейнера старый процесс кратко держит `getUpdates`. Бот на Railway **ждёт до ~3 мин** (по умолчанию 40×5 с) и не падает сразу. При необходимости: `RAILWAY_CONFLICT_RETRIES`, `RAILWAY_CONFLICT_WAIT_SEC`.
+
 **Один worker с этим токеном:** в Railway не включайте **два сервиса**, которые оба запускают **этого** бота с одним `TELEGRAM_BOT_TOKEN`. Сайт на Vercel сюда не попадает. Если создано два worker'а под одним токеном — **Pause** лишний.
 
 Опционально: `GEMINI_MODEL=gemini-2.5-flash`, `DATABASE_PATH=/data/gastrobar_bot.sqlite3` (если подключён Volume, см. ниже).
