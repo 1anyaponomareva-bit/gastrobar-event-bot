@@ -76,7 +76,7 @@ RADAR_API_FIRST: bool = os.getenv("RADAR_API_FIRST", "1").strip().lower() in (
     "on",
 )
 RADAR_API_MIN_SEED: int = max(
-    1, int(os.getenv("RADAR_API_MIN_SEED", "5") or "5")
+    1, int(os.getenv("RADAR_API_MIN_SEED", "3") or "3")
 )
 # Now24: без жёсткого top-N (только watchability + дедуп)
 NOW24_MAX_ITEMS: int = max(

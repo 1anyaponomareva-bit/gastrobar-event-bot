@@ -791,7 +791,7 @@ def build_gastrobar_weekly_program(
 
 # --- Weekly Event Radar: полный API-пул (без лимита 6 и без block-заглушек) ---
 
-WEEKLY_FOOTBALL_MIN_WATCHABILITY = 35
+WEEKLY_FOOTBALL_MIN_WATCHABILITY = 28
 
 _WORLD_HOCKEY_NATIONS = (
     "canada",
@@ -845,33 +845,52 @@ def is_weekly_radar_api_worthy(e: dict[str, Any]) -> bool:
     title = str(e.get("title", ""))
 
     if sport == "football":
+        if not _has_matchup_title(title):
+            return False
         if e.get("league_id") is not None:
             from football_watchability import (
+                _INTL_TOURNAMENTS,
+                _UEFA_CUPS,
+                _league_id,
                 football_watchability_score,
                 is_eligible_football_league_now24,
             )
 
-            if not is_eligible_football_league_now24(e):
-                return False
-            score, reason = football_watchability_score(e, None)
-            if score == 0 and reason == "uefa_no_top_club":
-                from watchability import _football_watchability
+            lid = _league_id(e)
+            top_lids = {39, 140, 135, 78, 61} | set(_UEFA_CUPS) | set(_INTL_TOURNAMENTS)
+            if lid in {39, 140, 135, 78, 61}:
+                return True
+            if lid in top_lids:
+                if not is_eligible_football_league_now24(e):
+                    return False
+                score, reason = football_watchability_score(e, None)
+                if score == 0 and reason == "uefa_no_top_club":
+                    from watchability import _football_watchability
 
-                score, _ = _football_watchability(blob, title)
-            if score >= WEEKLY_FOOTBALL_MIN_WATCHABILITY:
-                return True
-            if re.search(r"matchday\s+38|round\s+38|final\s+day", blob) and score >= 36:
-                return True
+                    score, _ = _football_watchability(blob, title)
+                if score >= WEEKLY_FOOTBALL_MIN_WATCHABILITY:
+                    return True
+                if re.search(
+                    r"matchday\s+\d+|round\s+\d+|final\s+day|semi|quarter|play.?off",
+                    blob,
+                    re.I,
+                ) and score >= 22:
+                    return True
             return False
         return _is_priority_event(e)
 
     if sport == "hockey":
-        if _is_world_championship_hockey(e) and _has_matchup_title(title):
+        if not _has_matchup_title(title):
+            return False
+        if _is_world_championship_hockey(e):
             return True
-        if "nhl" in blob and ("playoff" in blob or "stanley" in blob):
-            return _has_matchup_title(title)
-        if "khl" in blob and re.search(r"final|playoff|semifinal", blob, re.I):
-            return _has_matchup_title(title)
+        ll = (e.get("league") or "").lower()
+        if "nhl" in ll or "stanley" in ll or "playoff" in ll:
+            return True
+        if "world championship" in ll or "iihf" in ll:
+            return True
+        if "khl" in ll and re.search(r"final|playoff|semifinal", ll, re.I):
+            return True
         return False
 
     if sport == "basketball":
@@ -1229,17 +1248,18 @@ async def get_basketball_events() -> list[dict[str, Any]]:
             d_str, t_str = _parse_dt_to_local(dt_iso)
             if not d_str:
                 continue
-            day_events.append(
-                {
-                    "sport": "basketball",
-                    "title": title or "Game",
-                    "league": league_full or "Basketball",
-                    "date": d_str,
-                    "time": t_str,
-                    "importance": "low",
-                    "source": "API-SPORTS",
-                }
-            )
+            row: dict[str, Any] = {
+                "sport": "basketball",
+                "title": title or "Game",
+                "league": league_full or "Basketball",
+                "date": d_str,
+                "time": t_str,
+                "importance": "low",
+                "source": "API-SPORTS",
+            }
+            if dt_iso:
+                row["fixture_utc_iso"] = str(dt_iso)
+            day_events.append(row)
         return day_events
 
     chunks = await asyncio.gather(
@@ -1293,17 +1313,18 @@ async def get_hockey_events() -> list[dict[str, Any]]:
             d_str, t_str = _parse_dt_to_local(dt_iso)
             if not d_str:
                 continue
-            day_events.append(
-                {
-                    "sport": "hockey",
-                    "title": title or "Game",
-                    "league": league_full or "Hockey",
-                    "date": d_str,
-                    "time": t_str,
-                    "importance": "low",
-                    "source": "API-SPORTS",
-                }
-            )
+            row = {
+                "sport": "hockey",
+                "title": title or "Game",
+                "league": league_full or "Hockey",
+                "date": d_str,
+                "time": t_str,
+                "importance": "low",
+                "source": "API-SPORTS",
+            }
+            if dt_iso:
+                row["fixture_utc_iso"] = str(dt_iso)
+            day_events.append(row)
         return day_events
 
     chunks = await asyncio.gather(
@@ -1361,17 +1382,18 @@ async def get_formula_events() -> list[dict[str, Any]]:
             title = race_name or "Formula 1 race"
             if "formula" not in title.lower():
                 title = f"Formula 1 {title}".strip()
-            day_events.append(
-                {
-                    "sport": "formula1",
-                    "title": title,
-                    "league": "Formula 1",
-                    "date": d_str,
-                    "time": t_str,
-                    "importance": "low",
-                    "source": "API-SPORTS",
-                }
-            )
+            row = {
+                "sport": "formula1",
+                "title": title,
+                "league": "Formula 1",
+                "date": d_str,
+                "time": t_str,
+                "importance": "low",
+                "source": "API-SPORTS",
+            }
+            if dt_iso:
+                row["fixture_utc_iso"] = str(dt_iso)
+            day_events.append(row)
         return day_events
 
     chunks = await asyncio.gather(

@@ -1109,7 +1109,27 @@ async def _lock_events_from_sports_program(
             locked.append(_prepare_for_afisha_selection(le))
         else:
             log.info("%s: lock failed title=%r", phase, ev.get("title"))
-    return filter_radar_events(locked, phase=phase, allow_gemini_discovery=True)
+    from radar_current_week import is_in_current_week
+
+    out: list[dict[str, Any]] = []
+    for le in locked:
+        if is_in_current_week(le):
+            out.append(le)
+        else:
+            log.info(
+                "%s: out of current week title=%r date=%s",
+                phase,
+                le.get("title"),
+                le.get("local_date") or le.get("date"),
+            )
+    log.info(
+        "%s: locked_in=%s week_ok=%s dropped_week=%s",
+        phase,
+        len(locked),
+        len(out),
+        len(locked) - len(out),
+    )
+    return out
 
 
 async def _api_sports_weekly_seed() -> tuple[list[dict[str, Any]], int]:
@@ -1161,23 +1181,35 @@ async def _fetch_radar_pipeline(
     gemini_raw = 0
     fetch_note: str | None = None
 
-    skip_gemini = (
-        RADAR_API_FIRST
-        and len(api_seed) >= RADAR_API_MIN_SEED
-        and not force_gemini
-    )
+    skip_gemini = RADAR_API_FIRST and bool(api_seed) and not force_gemini
     if skip_gemini:
         log.info(
-            "Event Radar: API-first — skip Gemini (api_seed=%s, min=%s)",
+            "Event Radar: API-first — skip Gemini (api_seed=%s, api_raw=%s)",
             len(api_seed),
-            RADAR_API_MIN_SEED,
+            api_raw,
         )
         fetch_note = "api_first"
+        gemini_raw = 0
     else:
         prelim, gemini_raw, fetch_note = await asyncio.to_thread(
             fetch_radar_multi_search_sync, force_gemini=force_gemini
         )
     raw_total = max(api_raw, gemini_raw)
+
+    if skip_gemini and api_seed:
+        pool = [
+            e
+            for e in api_seed
+            if int(e.get("radar_tier", 99)) < 99 and not gastrobar_hard_reject(e)
+        ]
+        log.info(
+            "WEEKLY_PIPELINE API_ONLY: FOUND(raw_api)=%s SEED=%s POOL=%s",
+            api_raw,
+            len(api_seed),
+            len(pool),
+        )
+        final_pre = _finalize_week_selection(pool, [])
+        return final_pre, api_raw, api_raw, len(final_pre), fetch_note
 
     if fetch_note == "gemini_quota":
         fallback, fb_raw = await _fallback_events_from_sports_api()
@@ -1394,7 +1426,7 @@ async def get_event_radar_week(
 
     if final:
         await save_weekly_events_cache(final, source="weekly_radar")
-    return final, raw_total, len(pool), len(final), fetch_note
+    return final, raw_total, raw_total, len(final), fetch_note
 
 
 async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, str | None]:
