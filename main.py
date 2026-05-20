@@ -462,8 +462,13 @@ async def _run_radar_mode(
 
         if selected == 0:
             if mode == "now24":
+                from runtime_messages import format_now24_empty_message
+
                 await message.answer(
-                    "Нет событий в ближайшие 24 часа.",
+                    format_now24_empty_message(
+                        pool_count=pre_count or raw_total,
+                        fetch_note=fetch_note,
+                    ),
                     reply_markup=radar_now24_result_kb(),
                 )
             else:
@@ -848,13 +853,6 @@ async def cmd_check(message: Message) -> None:
         + ("connected" if sports.ok else (sports.details or "error"))
     )
     await message.answer("\n".join(lines))
-
-
-@router.message(F.text.func(lambda t: bool(t) and t.strip().lower().startswith("/events")))
-async def cmd_events_text_fallback(message: Message) -> None:
-    """На случай, если Command-фильтр не сработал (группа / клиент Telegram)."""
-    logger.info("cmd /events fallback via text=%r", message.text)
-    await message.answer(_events_menu_text(), reply_markup=radar_menu_kb())
 
 
 @router.message(F.text)

@@ -1456,11 +1456,17 @@ async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, 
     log_next24_window_header()
 
     api_pool = await fetch_now24_from_api_sports()
+    api_n = len(api_pool)
     if api_pool:
         final = select_now24_events(api_pool)
         if final:
             log.info("Event Radar now24 from API-SPORTS: %s", len(final))
-            return final, len(api_pool), len(api_pool), len(final), "api_sports_now24"
+            return final, api_n, api_n, len(final), "api_sports_now24"
+        log.warning(
+            "Event Radar now24: API pool=%s but selected=0 after filters/window",
+            api_n,
+        )
+        return [], api_n, api_n, 0, "api_filter_empty"
 
     cached = await load_weekly_events_cache()
     if cached:
@@ -1472,6 +1478,8 @@ async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, 
         )
         if final:
             return final, len(cached), len(cached), len(final), "weekly_cache"
+        if len(cached) > 0:
+            return [], len(cached), len(cached), 0, "api_filter_empty"
 
     pool, raw_total, prelim, fetch_note = await _fetch_radar_pipeline()
     final = select_now24_events(pool)

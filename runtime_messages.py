@@ -5,7 +5,7 @@ from __future__ import annotations
 from config import GEMINI_API_KEY, RUN_MODE, is_local_run, is_railway_run
 
 # Меняйте при деплое — по этой метке видно, какой код ответил в Telegram.
-BOT_BUILD_ID = "unauthorized-failfast-20260521"
+BOT_BUILD_ID = "fix-events-dup-now24-empty-hint-20260521"
 
 GEMINI_TROUBLESHOOT = (
     "Проверьте GEMINI_API_KEY через /check и посмотрите логи в терминале, "
@@ -70,6 +70,44 @@ def event_radar_error_message(reason: str) -> str:
     else:
         body = troubleshoot_footer()
     return f"❌ Event Radar: {label}\n\n{body}\n\n{build_tag_line()}"
+
+
+def format_now24_empty_message(
+    *,
+    pool_count: int = 0,
+    fetch_note: str | None = None,
+) -> str:
+    """Понятное «пусто» для режима 24 ч (не путать с поломкой Gemini)."""
+    lines = [
+        "⚡ Ближайшие 24 часа — сейчас пусто.",
+        "",
+        "Показываются только события, которые **начнутся в следующие 24 часа** "
+        "(время Нячанга). Уже **идущие** или **прошедшие** матчи сюда не попадают.",
+    ]
+    if pool_count > 0 or fetch_note == "api_filter_empty":
+        lines.extend(
+            [
+                "",
+                f"Из источника было **{pool_count}** кандидатов, но после фильтров Gastrobar "
+                "или окна времени ничего не осталось.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Сейчас в API/кэше нет матчей в этом окне. Проверьте **/check** (API-SPORTS) "
+                "или попробуйте позже.",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "📅 **Афиша на неделю** — полный список на 7 дней (часто там есть то, "
+            "что уже прошло по «24 ч»).",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def gemini_test_error_message() -> str:
