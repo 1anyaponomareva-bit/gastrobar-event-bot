@@ -5,7 +5,7 @@ from __future__ import annotations
 from config import GEMINI_API_KEY, RUN_MODE, is_local_run, is_railway_run
 
 # Меняйте при деплое — по этой метке видно, какой код ответил в Telegram.
-BOT_BUILD_ID = "api-pool-fix-20260520b"
+BOT_BUILD_ID = "force-refresh-api-fix-20260520"
 
 GEMINI_TROUBLESHOOT = (
     "Проверьте GEMINI_API_KEY через /check и посмотрите логи в терминале, "
@@ -19,6 +19,7 @@ _RADAR_REASON_RU: dict[str, str] = {
     "timeout": "timeout",
     "no_candidates": "no candidates",
     "verification_failed": "verification failed",
+    "api_filter_empty": "API events dropped by filters (tier/score)",
     "unexpected_error": "unexpected error",
 }
 
@@ -45,6 +46,12 @@ def event_radar_error_message(reason: str) -> str:
         body = (
             "⏳ Gemini временно перегружен (503). Ключ в порядке — подождите 1–2 минуты "
             "и нажмите «Обновить неделю».\n\n"
+            f"{runtime_logs_hint()}"
+        )
+    elif reason == "api_filter_empty":
+        body = (
+            "API-SPORTS вернул события, но все отфильтрованы (tier/score/watchability). "
+            "Проверьте RADAR_MIN_WATCHABILITY и логи Railway.\n\n"
             f"{runtime_logs_hint()}"
         )
     else:

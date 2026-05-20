@@ -915,6 +915,11 @@ def _prepare_for_afisha_selection(e: dict[str, Any]) -> dict[str, Any]:
 
     e = _enrich_ufc_for_afisha(e)
     tier = _bar_tier(e)
+    if tier >= 99 and (
+        e.get("source_verified")
+        or "api-sports" in str(e.get("verified_via", "")).lower()
+    ):
+        tier = 12
     e["radar_tier"] = tier
     if tier < RADAR_TIER_LOW:
         e["radar_priority"] = 1
@@ -1181,7 +1186,8 @@ async def _fetch_radar_pipeline(
     gemini_raw = 0
     fetch_note: str | None = None
 
-    skip_gemini = RADAR_API_FIRST and bool(api_seed) and not force_gemini
+    # «Обновить неделю» = свежий API, не принудительный Gemini
+    skip_gemini = RADAR_API_FIRST and bool(api_seed)
     if skip_gemini:
         log.info(
             "Event Radar: API-first — skip Gemini (api_seed=%s, api_raw=%s)",
@@ -1197,11 +1203,7 @@ async def _fetch_radar_pipeline(
     raw_total = max(api_raw, gemini_raw)
 
     if skip_gemini and api_seed:
-        pool = [
-            e
-            for e in api_seed
-            if int(e.get("radar_tier", 99)) < 99 and not gastrobar_hard_reject(e)
-        ]
+        pool = [e for e in api_seed if not gastrobar_hard_reject(e)]
         log.info(
             "WEEKLY_PIPELINE API_ONLY: FOUND(raw_api)=%s SEED=%s POOL=%s",
             api_raw,
@@ -1304,11 +1306,7 @@ async def _fetch_radar_pipeline(
         verified_all, phase="pipeline_final", allow_gemini_discovery=True
     )
 
-    pool = [
-        v
-        for v in verified_all
-        if int(v.get("radar_tier", 99)) < 99 and not gastrobar_hard_reject(v)
-    ]
+    pool = [v for v in verified_all if not gastrobar_hard_reject(v)]
     for v in pool:
         if v.get("radar_priority", 0) < 1:
             v["radar_priority"] = 2
@@ -1342,6 +1340,8 @@ async def _fetch_radar_pipeline(
             fetch_note = "no_candidates"
         elif prelim and not pool:
             fetch_note = "verification_failed"
+        elif not pool and api_seed:
+            fetch_note = "api_filter_empty"
     return pool, raw_total, prelim, fetch_note
 
 
@@ -1398,7 +1398,7 @@ async def get_event_radar_week(
             )
 
     pool, raw_total, prelim, fetch_note = await _fetch_radar_pipeline(
-        force_gemini=force_refresh
+        force_gemini=False,
     )
     final = _finalize_week_selection(pool, prelim)
     log.info(
