@@ -90,6 +90,7 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
 
     from sports_events import (
         get_basketball_events,
+        get_esports_events,
         get_football_events_next_days_vn,
         get_formula_events,
         get_hockey_events,
@@ -106,6 +107,16 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
         get_basketball_events(), label="basketball"
     )
     f1_raw = await _now24_from_sport_fetch(get_formula_events(), label="f1")
+    esports_raw = await _now24_from_sport_fetch(get_esports_events(), label="esports")
+
+    log.info(
+        "NOW24_API RAW COUNTS football=%s hockey=%s basketball=%s f1_rows=%s esports=%s",
+        len(football_raw),
+        len(hockey_raw),
+        len(basketball_raw),
+        len(f1_raw),
+        len(esports_raw),
+    )
 
     out: list[dict[str, Any]] = []
 
@@ -127,27 +138,34 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
         await _now24_filter_pool(
             hockey_raw,
             phase="now24_api_hockey",
-            min_watchability=40,
+            min_watchability=32,
         )
     )
     out.extend(
         await _now24_filter_pool(
             basketball_raw,
             phase="now24_api_basketball",
-            min_watchability=40,
+            min_watchability=32,
         )
     )
     out.extend(
         await _now24_filter_pool(
             f1_raw,
             phase="now24_api_f1",
-            min_watchability=50,
+            min_watchability=38,
+        )
+    )
+    out.extend(
+        await _now24_filter_pool(
+            esports_raw,
+            phase="now24_api_esports",
+            min_watchability=32,
         )
     )
 
     from radar_dedupe import dedupe_events
 
-    out = dedupe_events(out, log_prefix="now24_api_multi")
+    out = dedupe_events(out, log_prefix="now24_api_multi", exact=True)
 
     out.sort(
         key=lambda x: (
@@ -157,5 +175,5 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
             str(x.get("local_time") or x.get("time", "")),
         )
     )
-    log.info("now24 api multi-sport final=%s", len(out))
+    log.info("NOW24_API AFTER_DEDUPE=%s (exact keys)", len(out))
     return out

@@ -945,10 +945,25 @@ def _watchability_sort_key(e: dict[str, Any]) -> tuple[int, int, int, str, str]:
 
 def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Weekly: подробная афиша — все события выше порога watchability, без top-N."""
+    from collections import Counter
+
     from event_participants import filter_events_by_participants
     from radar_dedupe import dedupe_events, radar_dedupe_key
     from radar_pipeline_stats import PipelineStats
     from watchability import detect_editorial_type, is_major_weekly_event, min_watchability_for_event
+
+    in_counts = Counter(detect_editorial_type(e) for e in verified)
+    log.info(
+        "WEEKLY_PIPELINE INPUT: n=%s football=%s f1=%s nhl=%s nba=%s esports=%s ufc=%s other=%s",
+        len(verified),
+        in_counts.get("football", 0),
+        in_counts.get("f1", 0),
+        in_counts.get("nhl", 0),
+        in_counts.get("nba", 0),
+        in_counts.get("esports", 0),
+        in_counts.get("ufc", 0),
+        sum(v for k, v in in_counts.items() if k not in ("football", "f1", "nhl", "nba", "esports", "ufc")),
+    )
 
     stats = PipelineStats(label="weekly_select")
     stats.set("FOUND", len(verified))
@@ -1293,7 +1308,9 @@ async def _fetch_radar_pipeline(
     if api_seed:
         from radar_dedupe import dedupe_events
 
-        merged = dedupe_events(api_seed + verified_all, log_prefix="api_gemini_merge")
+        merged = dedupe_events(
+            api_seed + verified_all, log_prefix="api_gemini_merge", exact=True
+        )
         log.info(
             "Event Radar: merged API seed (%s) + verified (%s) -> %s",
             len(api_seed),

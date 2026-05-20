@@ -123,7 +123,9 @@ def is_major_weekly_event(e: dict[str, Any]) -> bool:
     ):
         return True
     if et == "f1" and re.search(
-        r"qualifying|sprint|\brace\b|grand\s+prix", b, re.I
+        r"qualifying|sprint|\brace\b|grand\s+prix|practice|fp[123]",
+        b,
+        re.I,
     ):
         return True
     if et == "ufc" and (
@@ -146,7 +148,10 @@ def is_major_weekly_event(e: dict[str, Any]) -> bool:
     if et == "eurovision" and re.search(r"grand\s+final|semi", b, re.I):
         return True
     if et == "esports" and re.search(
-        r"grand\s+final|major|worlds|international", b, re.I
+        r"grand\s+final|major|worlds|international|iem|blast|dreamleague|"
+        r"dream\s+league|esl|playoff|lan|championship",
+        b,
+        re.I,
     ):
         return True
     if re.search(
@@ -409,7 +414,7 @@ def _nhl_watchability(b: str, title: str) -> tuple[int, str]:
 
 def _f1_watchability(b: str) -> tuple[int, str]:
     if re.search(r"\bpractice\b|\bfp[123]\b|free\s+practice", b):
-        return 0, "practice"
+        return 62, "f1_practice"
     score = 78
     reasons = ["f1_weekend"]
     if re.search(r"\brace\b|grand\s+prix", b):
@@ -557,6 +562,10 @@ def compute_watchability_score(e: dict[str, Any]) -> tuple[int, str, str]:
         s = min(100, s + 6)
     elif conf == "low":
         s = max(0, s - 15)
+
+    if str(e.get("verified_via", "")).upper() == "API-SPORTS" and s < 40:
+        s = max(s, 40)
+        r = (r + "+api_floor") if r else "api_floor"
 
     return min(100, max(0, s)), etype, r
 

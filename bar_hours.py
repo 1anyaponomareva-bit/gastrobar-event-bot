@@ -82,7 +82,7 @@ def _event_blob(e: dict[str, Any]) -> str:
 
 
 def is_f1_allowed_session(e: dict[str, Any]) -> bool:
-    """Qualifying / Sprint / Race / Grand Prix — да; practice / FP — нет."""
+    """Все сессии гоночного уик-энда (включая practice) — показываем для gastrobar radar."""
     b = _event_blob(e)
     if not re.search(r"formula\s*1|\bf1\b", b):
         return True
@@ -92,23 +92,20 @@ def is_f1_allowed_session(e: dict[str, Any]) -> bool:
         return True
     if re.search(r"\brace\b", b) or re.search(r"grand\s+prix", b):
         return True
+    if re.search(r"\bpractice\b|\bfp[123]\b|free\s+practice|first\s+practice", b):
+        return True
     return False
 
 
 def is_f1_excluded_event(e: dict[str, Any]) -> bool:
-    """Practice / FP1–FP3 / Practice Session — не в афише."""
+    """Не показывать только если это F1 без понятной сессии (мусор/пустой заголовок)."""
     b = _event_blob(e)
     if not re.search(r"formula\s*1|\bf1\b", b):
         return False
     if is_f1_allowed_session(e):
         return False
-    if re.search(
-        r"\bpractice\b|\bfp[123]\b|free\s+practice|first\s+practice|practice\s+session",
-        b,
-    ):
-        return True
     log.info(
-        "f1_excluded: title=%r reason=f1_no_allowed_session",
+        "f1_excluded: title=%r reason=f1_no_recognized_session",
         e.get("title"),
     )
     return True

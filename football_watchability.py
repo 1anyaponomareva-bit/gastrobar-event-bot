@@ -41,6 +41,8 @@ _INTL_TOURNAMENTS = frozenset(
     }
 )
 
+_CHAMPIONSHIP_ENGLAND = 40
+
 _LEAGUE_BASE_SCORE: dict[int, int] = {
     2: 88,
     3: 76,
@@ -50,6 +52,7 @@ _LEAGUE_BASE_SCORE: dict[int, int] = {
     135: 72,
     78: 72,
     61: 68,
+    _CHAMPIONSHIP_ENGLAND: 56,
     1: 92,
     4: 90,
     5: 74,
@@ -131,6 +134,9 @@ def is_eligible_football_league_now24(item: dict[str, Any]) -> bool:
 
     country = str(item.get("league_country", "")).strip().lower()
 
+    if lid == _CHAMPIONSHIP_ENGLAND:
+        return country == "england"
+
     if lid in _DOMESTIC_TOP:
         return country == _DOMESTIC_TOP[lid]
 
@@ -186,8 +192,9 @@ def football_watchability_score(
         score += min(clubs * 12, 36)
         reasons.append(f"top_clubs×{clubs}")
     elif lid in _UEFA_CUPS:
-        # Еврокубки без узнаваемого топ-клуба — не для now24
-        return 0, "uefa_no_top_club"
+        # Еврокубок без «супер-бренда»: для бара всё равно сильный контент
+        score = max(score, 50)
+        reasons.append("uefa_match_any")
 
     if any(m in b for m in DERBY_MARKERS):
         score += 18

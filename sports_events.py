@@ -791,7 +791,11 @@ def build_gastrobar_weekly_program(
 
 # --- Weekly Event Radar: полный API-пул (без лимита 6 и без block-заглушек) ---
 
-WEEKLY_FOOTBALL_MIN_WATCHABILITY = 28
+WEEKLY_FOOTBALL_MIN_WATCHABILITY = 18
+
+# API-SPORTS league ids: UCL / UEL / Conference; Championship (England tier 2)
+_WEEKLY_UEFA_LEAGUE_IDS = frozenset({2, 3, 848})
+_CHAMPIONSHIP_ENGLAND_LEAGUE_ID = 40
 
 _WORLD_HOCKEY_NATIONS = (
     "canada",
@@ -836,6 +840,142 @@ def _has_matchup_title(title: str) -> bool:
     )
 
 
+def _log_found_breakdown(merged: list[dict[str, Any]], *, label: str) -> None:
+    fb = hk = nba = f1 = esp = mma = other = 0
+    for row in merged:
+        sp = str(row.get("sport", "")).lower()
+        if sp == "football":
+            fb += 1
+        elif sp == "hockey":
+            hk += 1
+        elif sp == "basketball":
+            nba += 1
+        elif sp in ("formula1", "f1"):
+            f1 += 1
+        elif sp == "esports":
+            esp += 1
+        elif sp in ("mma", "boxing"):
+            mma += 1
+        else:
+            other += 1
+    log.info(
+        "%s FOUND_TOTAL=%s FOOTBALL_FOUND=%s HOCKEY_FOUND=%s ESPORTS_FOUND=%s "
+        "F1_FOUND=%s NBA_FOUND=%s MMA_BOXING_FOUND=%s OTHER=%s",
+        label,
+        len(merged),
+        fb,
+        hk,
+        esp,
+        f1,
+        nba,
+        mma,
+        other,
+    )
+
+
+def _formula_session_dt_iso(block: dict[str, Any]) -> str:
+    d = block.get("date")
+    t = block.get("time")
+    if isinstance(d, str) and ("T" in d or len(d) > 12):
+        return d
+    if isinstance(d, str) and d and t:
+        ts = str(t).strip()
+        if re.match(r"^\d{2}:\d{2}", ts):
+            return f"{d[:10]}T{ts}"
+        return f"{d[:10]}T{ts}"
+    if isinstance(d, str):
+        return d
+    return ""
+
+
+def _expand_formula_api_item(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Одна строка /races → несколько (Practice / Qualifying / Sprint / Race), если есть в JSON."""
+    rows: list[dict[str, Any]] = []
+
+    def gp_label() -> str:
+        return str(
+            item.get("raceName")
+            or item.get("name")
+            or (item.get("competition") or {}).get("name")
+            or (item.get("circuit") or {}).get("name")
+            or item.get("grandPrix")
+            or item.get("grand_prix")
+            or "Grand Prix",
+        ).strip()
+
+    gp = gp_label()
+
+    session_map: tuple[tuple[str, str], ...] = (
+        ("firstPractice", "Practice 1"),
+        ("secondPractice", "Practice 2"),
+        ("thirdPractice", "Practice 3"),
+        ("FirstPractice", "Practice 1"),
+        ("SecondPractice", "Practice 2"),
+        ("ThirdPractice", "Practice 3"),
+        ("fp1", "Practice 1"),
+        ("fp2", "Practice 2"),
+        ("fp3", "Practice 3"),
+        ("sprintQualifying", "Sprint Qualifying"),
+        ("SprintQualifying", "Sprint Qualifying"),
+        ("sprint", "Sprint"),
+        ("Sprint", "Sprint"),
+        ("qualifying", "Qualifying"),
+        ("Qualifying", "Qualifying"),
+        ("race", "Race"),
+        ("Race", "Race"),
+    )
+
+    def append_row(dt_iso: str, sess: str) -> None:
+        dt_iso = str(dt_iso or "").strip()
+        if not dt_iso:
+            return
+        d_str, t_str = _parse_dt_to_local(dt_iso)
+        if not d_str:
+            return
+        title = f"F1 {gp} - {sess}"
+        row: dict[str, Any] = {
+            "sport": "formula1",
+            "title": title,
+            "league": "Formula 1",
+            "date": d_str,
+            "time": t_str,
+            "importance": "high" if sess == "Race" else "medium",
+            "source": "API-SPORTS",
+            "fixture_utc_iso": dt_iso,
+        }
+        rows.append(row)
+
+    for key, label in session_map:
+        block = item.get(key)
+        if isinstance(block, dict):
+            append_row(_formula_session_dt_iso(block), label)
+
+    if not rows:
+        sched = item.get("schedule") or item.get("sessions")
+        if isinstance(sched, dict):
+            for k, v in sched.items():
+                if not isinstance(v, dict):
+                    continue
+                dt_raw = _formula_session_dt_iso(v)
+                if dt_raw:
+                    kl = re.sub(r"[_-]+", " ", str(k)).strip().title() or "Session"
+                    append_row(dt_raw, kl)
+
+    if not rows:
+        dt_iso = item.get("date") or item.get("time") or ""
+        append_row(str(dt_iso), "Race")
+
+    seen: set[tuple[str, str, str]] = set()
+    unique: list[dict[str, Any]] = []
+    for r in rows:
+        key = (r["date"], r["time"], r["title"].lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(r)
+    return unique
+
+
 def is_weekly_radar_api_worthy(e: dict[str, Any]) -> bool:
     """Включить в weekly API-пул: топ-лиги, плей-офф, ЧМ по хоккею, F1-сессии."""
     if _is_excluded_event(e):
@@ -857,7 +997,12 @@ def is_weekly_radar_api_worthy(e: dict[str, Any]) -> bool:
             )
 
             lid = _league_id(e)
+            country = str(e.get("league_country") or "").strip().lower()
             top_lids = {39, 140, 135, 78, 61} | set(_UEFA_CUPS) | set(_INTL_TOURNAMENTS)
+            if lid == _CHAMPIONSHIP_ENGLAND_LEAGUE_ID and country == "england":
+                return True
+            if lid in _WEEKLY_UEFA_LEAGUE_IDS | set(_UEFA_CUPS):
+                return True
             if lid in {39, 140, 135, 78, 61}:
                 return True
             if lid in top_lids:
@@ -874,7 +1019,7 @@ def is_weekly_radar_api_worthy(e: dict[str, Any]) -> bool:
                     r"matchday\s+\d+|round\s+\d+|final\s+day|semi|quarter|play.?off",
                     blob,
                     re.I,
-                ) and score >= 22:
+                ) and score >= 14:
                     return True
             return False
         return _is_priority_event(e)
@@ -889,7 +1034,7 @@ def is_weekly_radar_api_worthy(e: dict[str, Any]) -> bool:
             return True
         if "world championship" in ll or "iihf" in ll:
             return True
-        if "khl" in ll and re.search(r"final|playoff|semifinal", ll, re.I):
+        if "khl" in ll:
             return True
         return False
 
@@ -903,9 +1048,22 @@ def is_weekly_radar_api_worthy(e: dict[str, Any]) -> bool:
         return _contains_any(blob, _TOP_NBA) and _has_matchup_title(title)
 
     if sport == "formula1":
-        if re.search(r"\bpractice\b|\bfp[123]\b|free\s+practice", blob):
-            return False
         return bool(title.strip())
+
+    if sport == "esports":
+        if not (_has_matchup_title(title) or re.search(r"\bvs\.?\b", title, re.I)):
+            return False
+        if _matches_interest(str(e.get("league", "")), title, ""):
+            return True
+        b = blob
+        return bool(
+            re.search(
+                r"\b(cs2|counter-strike|dota|lol|league\s+legends|valorant|dreamleague|"
+                r"dream\s+league|iem\b|esl\b|blast|major|msi|worlds|pgl|betboom|asian)",
+                b,
+                re.I,
+            )
+        )
 
     if sport == "mma":
         return "ufc" in blob and _has_matchup_title(title)
@@ -929,6 +1087,7 @@ def raw_event_to_radar_program_item(e: dict[str, Any]) -> dict[str, Any]:
         "hockey": "🏒",
         "basketball": "🏀",
         "formula1": "🏎",
+        "esports": "🎮",
         "mma": "🥊",
         "boxing": "🥊",
     }
@@ -957,7 +1116,15 @@ def build_weekly_radar_api_pool(merged: list[dict[str, Any]]) -> list[dict[str, 
     """Все API-матчи недели, прошедшие gastrobar-фильтр (без top-N)."""
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
-    stats = {"raw": len(merged), "worthy": 0, "football": 0, "hockey": 0, "nba": 0, "f1": 0}
+    stats = {
+        "raw": len(merged),
+        "worthy": 0,
+        "football": 0,
+        "hockey": 0,
+        "nba": 0,
+        "f1": 0,
+        "esports": 0,
+    }
 
     for e in merged:
         if not is_weekly_radar_api_worthy(e):
@@ -972,6 +1139,8 @@ def build_weekly_radar_api_pool(merged: list[dict[str, Any]]) -> list[dict[str, 
             stats["nba"] += 1
         elif sp == "formula1":
             stats["f1"] += 1
+        elif sp == "esports":
+            stats["esports"] += 1
         key = (str(e.get("date", "")), str(e.get("time", "")), str(e.get("title", "")))
         if key in seen:
             continue
@@ -999,6 +1168,12 @@ async def get_week_radar_pool_with_stats() -> tuple[list[dict[str, Any]], int, i
     """Полный API-пул для Event Radar week (не редакторская программа на 6 пунктов)."""
     merged = await _merge_raw_week_events()
     pool = build_weekly_radar_api_pool(merged)
+    log.info(
+        "RADAR_WEEKLY POOL_FINAL=%s (raw_merge=%s): "
+        "см. строку RADAR_MERGE_AFTER_FETCH и weekly radar API pool stats",
+        len(pool),
+        len(merged),
+    )
     return pool, len(merged), len(pool)
 
 
@@ -1340,6 +1515,100 @@ async def get_hockey_events() -> list[dict[str, Any]]:
     return events
 
 
+async def get_esports_events() -> list[dict[str, Any]]:
+    """
+    Esports API-SPORTS (v1.esports) — если включено в подписку.
+    Нет ключа/плана → дни тихо возвращают [].
+    """
+    if not SPORTS_API_KEY:
+        return []
+
+    start = _today()
+    headers = {"x-apisports-key": SPORTS_API_KEY}
+    base = "https://v1.esports.api-sports.io"
+
+    async def one_day(d: date) -> list[dict[str, Any]]:
+        collected: list[dict[str, Any]] = []
+        for path in (
+            f"/games?date={d.isoformat()}",
+            f"/matches?date={d.isoformat()}",
+        ):
+            url = f"{base}{path}"
+            log.info("Esports endpoint: %s", url)
+            try:
+                data = await _get_json(url, headers=headers)
+            except Exception as e:
+                log.info("Esports path failed (%s): %s", path, e)
+                continue
+            resp = data.get("response") or []
+            if not isinstance(resp, list):
+                continue
+            for item in resp:
+                league_o = item.get("league") or item.get("tournament") or {}
+                league_name = (
+                    league_o.get("name") if isinstance(league_o, dict) else str(league_o or "")
+                )
+                teams = item.get("teams") or item.get("opponents") or {}
+                home = ""
+                away = ""
+                if isinstance(teams, dict):
+                    th = teams.get("home") or teams.get("player1") or teams.get("team1")
+                    ta = teams.get("away") or teams.get("player2") or teams.get("team2")
+                    if isinstance(th, dict):
+                        home = str(th.get("name") or "")
+                    elif th:
+                        home = str(th)
+                    if isinstance(ta, dict):
+                        away = str(ta.get("name") or "")
+                    elif ta:
+                        away = str(ta)
+                title = str(
+                    item.get("name") or ""
+                ).strip() or (
+                    f"{home} — {away}".replace("vs", "").strip(" —").strip()
+                )
+                title = title or "Esports match"
+                if home and away and home not in title and away not in title:
+                    title = f"{home} — {away}"
+                dt_iso = (
+                    item.get("begin_at")
+                    or item.get("scheduled_at")
+                    or item.get("date")
+                    or item.get("time")
+                    or ""
+                )
+                d_str, t_str = _parse_dt_to_local(str(dt_iso))
+                if not d_str:
+                    continue
+                row = {
+                    "sport": "esports",
+                    "title": title,
+                    "league": league_name or "Esports",
+                    "date": d_str,
+                    "time": t_str,
+                    "importance": "medium",
+                    "source": "API-SPORTS",
+                    "fixture_utc_iso": str(dt_iso) if dt_iso else "",
+                }
+                collected.append(row)
+            if collected:
+                break
+        log.info("Esports resolved on %s: %s items", d.isoformat(), len(collected))
+        return collected
+
+    chunks = await asyncio.gather(
+        *[one_day(start + timedelta(days=i)) for i in range(7)],
+        return_exceptions=True,
+    )
+    events: list[dict[str, Any]] = []
+    for ch in chunks:
+        if isinstance(ch, Exception):
+            log.error("Esports parallel day failed: %s", ch)
+            continue
+        events.extend(ch)
+    return events
+
+
 async def get_formula_events() -> list[dict[str, Any]]:
     """
     Formula 1 API-SPORTS: ближайшие гонки/мероприятия.
@@ -1368,32 +1637,15 @@ async def get_formula_events() -> list[dict[str, Any]]:
 
         day_events: list[dict[str, Any]] = []
         for item in resp:
-            race_name = (
-                item.get("raceName")
-                or item.get("name")
-                or item.get("race")
-                or item.get("eventName")
-                or ""
-            )
-            dt_iso = item.get("date") or item.get("time") or ""
-            d_str, t_str = _parse_dt_to_local(str(dt_iso))
-            if not d_str:
+            if not isinstance(item, dict):
                 continue
-            title = race_name or "Formula 1 race"
-            if "formula" not in title.lower():
-                title = f"Formula 1 {title}".strip()
-            row = {
-                "sport": "formula1",
-                "title": title,
-                "league": "Formula 1",
-                "date": d_str,
-                "time": t_str,
-                "importance": "low",
-                "source": "API-SPORTS",
-            }
-            if dt_iso:
-                row["fixture_utc_iso"] = str(dt_iso)
-            day_events.append(row)
+            expanded = _expand_formula_api_item(item)
+            log.debug(
+                "Formula1 expand rows=%s sample_keys=%s",
+                len(expanded),
+                list(item.keys())[:12],
+            )
+            day_events.extend(expanded)
         return day_events
 
     chunks = await asyncio.gather(
@@ -1423,15 +1675,18 @@ async def _merge_raw_week_events() -> list[dict[str, Any]]:
         get_basketball_events(),
         get_hockey_events(),
         get_formula_events(),
+        get_esports_events(),
         return_exceptions=True,
     )
 
     merged: list[dict[str, Any]] = []
-    for r in results:
+    labels = ("football", "basketball", "hockey", "formula1", "esports")
+    for i, r in enumerate(results):
         if isinstance(r, Exception):
-            log.error("get_week_events sport task failed: %s", r)
+            log.error("get_week_events sport=%s failed: %s", labels[i], r)
             continue
         merged.extend(r)
+    _log_found_breakdown(merged, label="RADAR_MERGE_AFTER_FETCH")
     return merged
 
 

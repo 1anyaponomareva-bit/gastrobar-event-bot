@@ -109,6 +109,99 @@ async def fetch_week_events_for_daily() -> list[dict[str, Any]]:
     return [_prepare_for_afisha_selection(dict(e)) for e in filtered]
 
 
+def _now24_bucket(ev: dict[str, Any]) -> str:
+    from watchability import detect_editorial_type
+
+    et = str(ev.get("editorial_type") or "").strip().lower()
+    if not et:
+        et = detect_editorial_type(ev)
+    if et == "f1":
+        return "f1"
+    if et == "football":
+        return "football"
+    if et == "nhl":
+        return "nhl"
+    if et == "nba":
+        return "nba"
+    if et == "esports":
+        return "esports"
+    if et == "ufc":
+        return "ufc"
+    if et in ("eurovision", "live"):
+        return "live"
+    return "other"
+
+
+def _select_now24_balanced(
+    candidates: list[dict[str, Any]],
+    *,
+    limit: int,
+    min_items: int,
+) -> list[dict[str, Any]]:
+    """Round-robin по категориям, затем добор по score; дедуп только exact."""
+    from radar_dedupe import radar_dedupe_key
+
+    order = ("f1", "football", "nhl", "nba", "esports", "ufc", "live", "other")
+    buckets: dict[str, list[dict[str, Any]]] = {k: [] for k in order}
+    for e in candidates:
+        buckets[_now24_bucket(e)].append(e)
+
+    def sk(x: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            -int(x.get("watchability_score", 0)),
+            -int(x.get("football_watchability_score", 0)),
+            _daily_priority_score(x),
+            event_start_datetime_vn(x) or datetime.max.replace(tzinfo=TZ),
+        )
+
+    for k in buckets:
+        buckets[k].sort(key=sk)
+
+    taken: set[tuple[str, str, str]] = set()
+    out: list[dict[str, Any]] = []
+
+    def try_take(ev: dict[str, Any]) -> None:
+        dk = radar_dedupe_key(ev, exact=True)
+        if dk in taken:
+            return
+        taken.add(dk)
+        out.append(ev)
+
+    max_round = max((len(buckets[k]) for k in order), default=0)
+    for ri in range(max_round):
+        if len(out) >= limit:
+            break
+        for k in order:
+            if len(out) >= limit:
+                break
+            lst = buckets[k]
+            if ri < len(lst):
+                try_take(lst[ri])
+
+    remainder_sorted = sorted(candidates, key=sk)
+    for e in remainder_sorted:
+        if len(out) >= limit:
+            break
+        try_take(e)
+
+    floor_cap = min(limit, len(candidates))
+    floor = min(min_items, floor_cap)
+    if len(out) < floor:
+        for e in remainder_sorted:
+            if len(out) >= floor_cap:
+                break
+            try_take(e)
+
+    log.info(
+        "NOW24 FINAL_SELECTED=%s (limit=%s floor=%s candidates=%s)",
+        len(out),
+        limit,
+        floor,
+        len(candidates),
+    )
+    return out
+
+
 def select_now24_events(
     events: list[dict[str, Any]] | None = None,
     *,
@@ -176,24 +269,13 @@ def select_now24_events(
             event_start_datetime_vn(x) or datetime.max.replace(tzinfo=TZ),
         )
     )
-    from config import NOW24_MAX_ITEMS
+    from config import NOW24_MAX_ITEMS, NOW24_MIN_ITEMS
 
-    out: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for e in candidates:
-        if len(out) >= NOW24_MAX_ITEMS:
-            break
-        key = (
-            str(e.get("date", "")),
-            str(e.get("title", "")).lower()[:80],
-            str(e.get("display_time") or e.get("time", "")),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(e)
-
-    return out
+    return _select_now24_balanced(
+        candidates,
+        limit=NOW24_MAX_ITEMS,
+        min_items=NOW24_MIN_ITEMS,
+    )
 
 
 def collect_campaign_events(

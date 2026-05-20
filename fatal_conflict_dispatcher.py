@@ -17,43 +17,13 @@ from aiogram.utils.backoff import Backoff, BackoffConfig
 
 from config import is_local_run
 
-_LOCAL_CONFLICT_RETRIES = 12
-_LOCAL_CONFLICT_WAIT_SEC = 10.0
+# Короткое ожидание: при деплое Railway не долбить getUpdates минутами.
+_LOCAL_CONFLICT_RETRIES = 3
+_LOCAL_CONFLICT_WAIT_SEC = 5.0
 
 if TYPE_CHECKING:
     from aiogram.client.bot import Bot
     from aiogram.types import Update
-
-
-def _notify_admin_conflict() -> None:
-    try:
-        import json
-        import urllib.error
-        import urllib.request
-
-        from config import ADMIN_ID, TELEGRAM_BOT_TOKEN
-
-        if not (ADMIN_ID and TELEGRAM_BOT_TOKEN):
-            return
-        text = (
-            "⚠️ Локальный Gastrobar-бот остановлен (TelegramConflictError).\n\n"
-            "Другой экземпляр уже держит getUpdates.\n"
-            "Закройте все окна с ботом или Revoke token в BotFather.\n\n"
-            "Пока конфликт есть, локальный бот не получает сообщения."
-        )
-        payload = json.dumps(
-            {"chat_id": ADMIN_ID, "text": text},
-            ensure_ascii=False,
-        ).encode("utf-8")
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=10)
-    except (urllib.error.URLError, OSError, ValueError):
-        pass
 
 
 def _exit_on_conflict(context: str) -> None:
@@ -63,7 +33,9 @@ def _exit_on_conflict(context: str) -> None:
         "Процесс завершается без retry.",
         context,
     )
-    _notify_admin_conflict()
+    from conflict_notify import send_conflict_telegram_once
+
+    send_conflict_telegram_once()
     print(
         "\n"
         "=" * 62 + "\n"
@@ -76,7 +48,9 @@ def _exit_on_conflict(context: str) -> None:
         "4. start_bot.bat\n",
         file=sys.stderr,
     )
-    raise SystemExit(1)
+    import os
+
+    os._exit(1)
 
 
 class FatalConflictDispatcher(Dispatcher):

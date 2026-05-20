@@ -28,6 +28,7 @@ _SPORT_CATEGORY = {
     "hockey": ("HOCKEY", "🏒"),
     "basketball": ("BASKETBALL", "🏀"),
     "formula1": ("SPORTS", "🏎"),
+    "esports": ("ESPORTS", "🎮"),
     "mma": ("SPORTS", "🥊"),
     "boxing": ("SPORTS", "🥊"),
 }
@@ -71,7 +72,12 @@ def program_item_to_radar_event(item: dict[str, Any]) -> dict[str, Any] | None:
     tier = str(item.get("tier", "high")).lower()
     sport = str(item.get("sport", "football")).lower()
     cat, default_emoji = _SPORT_CATEGORY.get(sport, ("SPORTS", "🏟"))
-    emoji = str(item.get("emoji", default_emoji)).strip() or default_emoji
+    raw_em = item.get("emoji")
+    emoji = (
+        default_emoji
+        if raw_em is None or raw_em == ""
+        else (str(raw_em).strip() or default_emoji)
+    )
     ev: dict[str, Any] = {
         "date": date_s,
         "time": time_s,
@@ -104,10 +110,10 @@ def lock_football_fixture_event(
     iso = str(item.get("fixture_utc_iso") or "").strip()
     if not iso:
         return None
-    ev = program_item_to_radar_event(
-        {
+    sport = str(item.get("sport", "football")).lower()
+    pi: dict[str, Any] = {
             "kind": "match",
-            "sport": "football",
+            "sport": sport,
             "title": item.get("title", ""),
             "league_label_ru": item.get("league", ""),
             "league_raw": item.get("league", ""),
@@ -116,8 +122,10 @@ def lock_football_fixture_event(
             "league_id": item.get("league_id"),
             "league_country": item.get("league_country"),
             "tier": "high",
-        }
-    )
+    }
+    if item.get("emoji"):
+        pi["emoji"] = item.get("emoji")
+    ev = program_item_to_radar_event(pi)
     if not ev:
         return None
     from locked_time import lock_event_from_api_utc_iso

@@ -46,7 +46,8 @@ _FAKE_ESPORTS_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 _ESPORTS_ALLOW_RE = re.compile(
     r"\b(iem|esl|blast|major|msi|worlds|champions|the\s+international|ti\s*\d|"
-    r"valorant\s+masters|lec|lcs|lck|vct|pgl|dreamhack)\b",
+    r"valorant\s+masters|lec|lcs|lck|vct|pgl|dreamhack|cs2|dota|dreamleague|"
+    r"dream\s+league|falcons|asia\s+championship)\b",
     re.I,
 )
 

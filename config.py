@@ -66,7 +66,7 @@ RADAR_WEEKLY_MAX: int = max(
     50, int(os.getenv("RADAR_WEEKLY_MAX", "999") or "999")
 )
 RADAR_MIN_WATCHABILITY: int = max(
-    0, int(os.getenv("RADAR_MIN_WATCHABILITY", "24") or "24")
+    0, int(os.getenv("RADAR_MIN_WATCHABILITY", "18") or "18")
 )
 # API-first: Gemini только если API дал мало событий
 RADAR_API_FIRST: bool = os.getenv("RADAR_API_FIRST", "1").strip().lower() in (
@@ -80,7 +80,12 @@ RADAR_API_MIN_SEED: int = max(
 )
 # Now24: без жёсткого top-N (только watchability + дедуп)
 NOW24_MAX_ITEMS: int = max(
-    8, int(os.getenv("NOW24_MAX_ITEMS", "50") or "50")
+    8, int(os.getenv("NOW24_MAX_ITEMS", "15") or "15")
+)
+
+# Минимум строк в выдаче «24 часа» (если после фильтров есть кандидаты).
+NOW24_MIN_ITEMS: int = max(
+    1, int(os.getenv("NOW24_MIN_ITEMS", "8") or "8")
 )
 # Минимум событий в weekly после отбора (backfill major events)
 RADAR_WEEKLY_TARGET_MIN: int = max(
@@ -92,5 +97,5 @@ GASTROBAR_TV_COUNT: int = max(1, int(os.getenv("GASTROBAR_TV_COUNT", "2") or "2"
 
 # Football now24: минимальный football_watchability_score (API-SPORTS)
 NOW24_FOOTBALL_MIN_WATCHABILITY: int = max(
-    40, int(os.getenv("NOW24_FOOTBALL_MIN_WATCHABILITY", "48") or "48")
+    28, int(os.getenv("NOW24_FOOTBALL_MIN_WATCHABILITY", "38") or "38")
 )
