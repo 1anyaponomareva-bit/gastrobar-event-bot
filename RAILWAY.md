@@ -1,6 +1,14 @@
 # Деплой на Railway
 
-Бот работает **только в одном месте**: локально (`start_bot.bat`) **или** на Railway. Два polling на одном токене → конфликт, команды не отвечают.
+## Это не сайт Gastrobar на Vercel
+
+Отдельный проект — **сайт Gastrobar** (GitHub + **Vercel**) — **не этот репозиторий** и **не деплоится через Railway**.
+
+Здесь только **Telegram-бот**: репозиторий **`gastrobar-event-bot`** и один **Worker** на Railway с `TELEGRAM_BOT_TOKEN`. Название **проекта** в Railway может быть любым (например `astonishing-smile`).
+
+---
+
+Бот работает **только в одном месте**: локально (`start_bot.bat`) **или** на Railway. Два процесса с одним токеном дерутся за `getUpdates` — команды в Telegram могут не доходить.
 
 ## 1. Остановить локальный бот
 
@@ -12,8 +20,8 @@ powershell -File scripts\kill_bot.ps1
 
 ## 2. Проект Railway
 
-1. [railway.app](https://railway.app) → проект **gastrobar** (или новый).
-2. **New Service** → **GitHub Repo** → `1anyaponomareva-bit/gastrobar-event-bot`, ветка `main`.
+1. [railway.app](https://railway.app) → любой ваш проект (имя карты в UI не привязано к сайту на Vercel).
+2. **New Service** → **GitHub Repo** → **`1anyaponomareva-bit/gastrobar-event-bot`**, ветка **`main`** (именно репозиторий бота, не репо сайта).
 3. Тип сервиса: **Worker** (не Web). Если Railway создал Web — в Settings → удалите домен / смените на worker-only; важна только команда старта из `railway.toml`.
 
 ## 3. Переменные окружения (Variables)
@@ -37,7 +45,7 @@ powershell -File scripts\kill_bot.ps1
 
 **`RUN_MODE`:** на Railway **не ставьте `local`** — бот уйдёт в «локальный» режим и будет конфликтовать с самим собой. Лучше: `RUN_MODE=railway` или вообще не задавать (авто по `RAILWAY_ENVIRONMENT`).
 
-**Один сервис:** в проекте должен работать **только один** worker с этим токеном. Если есть и `gastrobar`, и `gastrobar-event-bot` — остановите (Pause) лишний.
+**Один worker с этим токеном:** в Railway не включайте **два сервиса**, которые оба запускают **этого** бота с одним `TELEGRAM_BOT_TOKEN`. Сайт на Vercel сюда не попадает. Если создано два worker'а под одним токеном — **Pause** лишний.
 
 Опционально: `GEMINI_MODEL=gemini-2.5-flash`, `DATABASE_PATH=/data/gastrobar_bot.sqlite3` (если подключён Volume, см. ниже).
 
@@ -60,11 +68,11 @@ powershell -File scripts\kill_bot.ps1
 
 ## 6. Локальная разработка снова
 
-1. В Railway: **Settings → Redeploy** выключить или **Pause** / удалить сервис.
+1. В Railway: **Pause** / удалить **worker бота** (не путать с сайтом на Vercel).
 2. Подождать ~30 с, `scripts\check_telegram_conflict.py` → OK.
 3. `.env`: `RUN_MODE=local`
 4. `start_bot.bat`
 
 ## Конфликт токена
 
-Если `check_telegram_conflict.py` падает: где-то ещё запущен бот (второе окно, старый Railway, другой ПК). Оставьте **один** источник polling.
+Если `check_telegram_conflict.py` падает: где-то ещё запущен бот (второе окно, второй Railway worker, другой ПК). Оставьте **один** источник polling. Сайт на Vercel к `getUpdates` не обращается.
