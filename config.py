@@ -66,7 +66,7 @@ RADAR_WEEKLY_MAX: int = max(
     50, int(os.getenv("RADAR_WEEKLY_MAX", "999") or "999")
 )
 RADAR_MIN_WATCHABILITY: int = max(
-    0, int(os.getenv("RADAR_MIN_WATCHABILITY", "32") or "32")
+    0, int(os.getenv("RADAR_MIN_WATCHABILITY", "24") or "24")
 )
 # API-first: Gemini только если API дал мало событий
 RADAR_API_FIRST: bool = os.getenv("RADAR_API_FIRST", "1").strip().lower() in (

@@ -214,6 +214,14 @@ def passes_participant_rules(e: dict[str, Any]) -> tuple[bool, str]:
                 return True, "ufc_main_with_bout"
         return False, "ufc_missing_fighters"
 
+    if e.get("source_verified") or "api-sports" in str(
+        e.get("verified_via", "")
+    ).lower() or str(e.get("verification_reason", "")).lower() == "api_sports_match":
+        if has_matchup_in_title(title):
+            return True, "api_verified_matchup"
+        if _is_f1(b) or _is_esports(b, cat):
+            return True, "api_verified_session"
+
     if _is_sport_match_event(b, cat):
         if has_matchup_in_title(title):
             return True, "sport_matchup"

@@ -18,8 +18,9 @@ def normalize_event_title(title: str) -> str:
     return t
 
 
-def radar_dedupe_key(e: dict[str, Any]) -> tuple[str, str, str]:
-    title = normalize_event_title(str(e.get("title", "")))
+def radar_dedupe_key(e: dict[str, Any], *, exact: bool = False) -> tuple[str, str, str]:
+    raw_title = str(e.get("title", "")).strip().lower()
+    title = raw_title if exact else normalize_event_title(raw_title)
     utc = str(e.get("utc_datetime", "")).strip()
     if utc:
         dt_key = utc
@@ -46,6 +47,7 @@ def dedupe_events(
     events: list[dict[str, Any]],
     *,
     log_prefix: str = "",
+    exact: bool = False,
 ) -> list[dict[str, Any]]:
     import logging
 
@@ -53,7 +55,7 @@ def dedupe_events(
     seen: set[tuple[str, str, str]] = set()
     out: list[dict[str, Any]] = []
     for e in events:
-        k = radar_dedupe_key(e)
+        k = radar_dedupe_key(e, exact=exact)
         if k in seen:
             if log_prefix:
                 log.info(

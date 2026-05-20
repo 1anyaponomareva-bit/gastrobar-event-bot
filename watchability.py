@@ -118,7 +118,9 @@ def is_major_weekly_event(e: dict[str, Any]) -> bool:
         r"conference\s+final|nba\s+finals|\bfinals\b|playoff", b, re.I
     ):
         return True
-    if et == "nhl" and re.search(r"stanley|conference\s+final|playoff", b, re.I):
+    if et == "nhl" and re.search(
+        r"stanley|conference\s+final|playoff|world\s+championship|iihf", b, re.I
+    ):
         return True
     if et == "f1" and re.search(
         r"qualifying|sprint|\brace\b|grand\s+prix", b, re.I
@@ -161,7 +163,10 @@ def is_major_weekly_event(e: dict[str, Any]) -> bool:
 def min_watchability_for_event(e: dict[str, Any], *, default_min: int) -> int:
     """Порог watchability: ниже для major events (medium confidence OK)."""
     if is_major_weekly_event(e):
-        return max(28, default_min - 12)
+        return max(18, default_min - 14)
+    et = detect_editorial_type(e)
+    if et in ("football", "f1", "nhl", "nba", "esports"):
+        return max(20, default_min - 8)
     return default_min
 
 
@@ -353,6 +358,29 @@ def _nhl_watchability(b: str, title: str) -> tuple[int, str]:
     reasons: list[str] = []
     teams = _count_tokens(b + " " + title.lower(), NHL_TOP_TEAMS)
 
+    if re.search(r"world\s+championship|iihf", b, re.I):
+        score += 38
+        reasons.append("world_championship")
+        nations = sum(
+            1
+            for n in (
+                "canada",
+                "usa",
+                "finland",
+                "sweden",
+                "czech",
+                "italy",
+                "switzerland",
+                "germany",
+                "latvia",
+                "slovakia",
+            )
+            if n in b or n in title.lower()
+        )
+        if nations:
+            score += min(nations * 8, 24)
+            reasons.append(f"nations×{nations}")
+
     if has_matchup_in_title(title):
         score += 22
         reasons.append("matchup")
@@ -382,16 +410,19 @@ def _nhl_watchability(b: str, title: str) -> tuple[int, str]:
 def _f1_watchability(b: str) -> tuple[int, str]:
     if re.search(r"\bpractice\b|\bfp[123]\b|free\s+practice", b):
         return 0, "practice"
-    score = 72
+    score = 78
     reasons = ["f1_weekend"]
     if re.search(r"\brace\b|grand\s+prix", b):
-        score += 12
+        score += 14
         reasons.append("race")
+    elif re.search(r"sprint\s+qualifying", b):
+        score += 12
+        reasons.append("sprint_qualifying")
     elif re.search(r"sprint", b):
-        score += 8
+        score += 10
         reasons.append("sprint")
     elif re.search(r"qualifying", b):
-        score += 6
+        score += 8
         reasons.append("qualifying")
     return min(100, score), "+".join(reasons)
 
@@ -426,17 +457,53 @@ def _eurovision_watchability(b: str) -> tuple[int, str]:
     return 45, "eurovision_other"
 
 
+_ESPORTS_ORGS = (
+    "navi",
+    "natus vincere",
+    "liquid",
+    "team liquid",
+    "falcons",
+    "mouz",
+    "g2",
+    "vitality",
+    "spirit",
+    "betboom",
+    "tundra",
+    "virtus.pro",
+    "virtus pro",
+    "mongolz",
+    "the mongolz",
+    "faze",
+    "heroic",
+    "cloud9",
+    "ence",
+    "astralis",
+)
+
+
 def _esports_watchability(b: str, title: str) -> tuple[int, str]:
     if re.search(r"final\s+day\s+events?|qualifier\s+round|group\s+stage", b):
         return 12, "vague_round"
-    score = 40
-    reasons: list[str] = []
-    if re.search(r"grand\s+final|major|champions|worlds|international|iem|blast", b):
-        score += 35
+    score = 48
+    reasons: list[str] = ["esports_base"]
+    if re.search(
+        r"grand\s+final|major|champions|worlds|international|iem|blast|dreamleague|"
+        r"dream\s+league|esl|asia\s+championship|pgl",
+        b,
+        re.I,
+    ):
+        score += 32
         reasons.append("major_stage")
+    orgs = _count_tokens(b + " " + title.lower(), _ESPORTS_ORGS)
+    if orgs:
+        score += min(orgs * 14, 42)
+        reasons.append(f"top_orgs×{orgs}")
     if has_matchup_in_title(title) or "—" in title:
-        score += 15
+        score += 18
         reasons.append("matchup")
+    if re.search(r"\bcs2\b|counter-strike|dota\s*2?", b, re.I):
+        score += 10
+        reasons.append("tier1_game")
     return min(100, max(0, score)), "+".join(reasons) or "esports"
 
 

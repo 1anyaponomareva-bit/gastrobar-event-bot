@@ -240,8 +240,11 @@ def validate_radar_event(
 
     verified = is_source_verified(e)
     if requires_strict_verification(e) and not verified:
-        log_radar_validation("rejected_unverified_event", e, phase=phase)
-        return None
+        if str(e.get("verified_via", "")).upper() == "API-SPORTS":
+            verified = True
+        else:
+            log_radar_validation("rejected_unverified_event", e, phase=phase)
+            return None
 
     if not verified:
         gemini_ok = allow_gemini_discovery or allows_gemini_discovery_only(e)

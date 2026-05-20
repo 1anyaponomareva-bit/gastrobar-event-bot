@@ -791,7 +791,7 @@ def build_gastrobar_weekly_program(
 
 # --- Weekly Event Radar: полный API-пул (без лимита 6 и без block-заглушек) ---
 
-WEEKLY_FOOTBALL_MIN_WATCHABILITY = 42
+WEEKLY_FOOTBALL_MIN_WATCHABILITY = 35
 
 _WORLD_HOCKEY_NATIONS = (
     "canada",
@@ -869,6 +869,8 @@ def is_weekly_radar_api_worthy(e: dict[str, Any]) -> bool:
         if _is_world_championship_hockey(e) and _has_matchup_title(title):
             return True
         if "nhl" in blob and ("playoff" in blob or "stanley" in blob):
+            return _has_matchup_title(title)
+        if "khl" in blob and re.search(r"final|playoff|semifinal", blob, re.I):
             return _has_matchup_title(title)
         return False
 

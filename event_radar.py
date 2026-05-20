@@ -144,6 +144,8 @@ def _bar_priority_heuristic(e: dict[str, Any]) -> int:
             "bundesliga",
             "serie a",
             "ligue 1",
+            "europa league",
+            "conference league",
         )
     ) and re.search(r"\bvs\.?\b|\s—\s|\s-\s", b):
         return 1
@@ -254,6 +256,11 @@ def _bar_tier(e: dict[str, Any]) -> int:
         return 6
     if "stanley" in b or ("nhl" in b and re.search(r"playoff", b)):
         return 7
+    if re.search(r"world\s+championship|iihf", b, re.I):
+        from event_participants import has_matchup_in_title
+
+        if has_matchup_in_title(str(e.get("title", ""))):
+            return 7
 
     if re.search(r"formula\s*1|\bf1\b", b):
         return 8
@@ -932,27 +939,36 @@ def _watchability_sort_key(e: dict[str, Any]) -> tuple[int, int, int, str, str]:
 
 
 def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """
-    Weekly: подробная афиша — F1 сессии, NBA, топ-EPL по отдельности (без схлопывания).
-    """
+    """Weekly: подробная афиша — все события выше порога watchability, без top-N."""
+    from event_participants import filter_events_by_participants
+    from radar_dedupe import dedupe_events, radar_dedupe_key
+    from radar_pipeline_stats import PipelineStats
+    from watchability import detect_editorial_type, is_major_weekly_event, min_watchability_for_event
+
+    stats = PipelineStats(label="weekly_select")
+    stats.set("FOUND", len(verified))
+
     verified = [
         e
         for e in verified
         if str(e.get("confidence", "medium")).lower() in ("high", "medium")
     ]
-    from event_participants import filter_events_by_participants
-    from radar_dedupe import dedupe_events, radar_dedupe_key
-    from watchability import detect_editorial_type, is_major_weekly_event, min_watchability_for_event
+    stats.set("AFTER_CONFIDENCE", len(verified))
 
     prepared = [_prepare_for_afisha_selection(dict(e)) for e in verified]
-    prepared = filter_events_by_participants(prepared, log_prefix="weekly_select")
+    after_participants = filter_events_by_participants(prepared, log_prefix="weekly_select")
+    stats.set("AFTER_PARTICIPANTS", len(after_participants))
+    if len(prepared) > len(after_participants):
+        log.info(
+            "weekly_select participants dropped: %s",
+            len(prepared) - len(after_participants),
+        )
 
     from event_lock import has_confirmed_vn_time
-
     from locked_time import lock_event_schedule
 
     timed: list[dict[str, Any]] = []
-    for e in prepared:
+    for e in after_participants:
         if has_confirmed_vn_time(e):
             timed.append(e)
             continue
@@ -960,36 +976,26 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
         if le and has_confirmed_vn_time(le):
             timed.append(le)
             continue
-        from radar_recall import log_radar_rejection
-
-        log_radar_rejection("weekly_select", "missing_datetime", e)
-    prepared = timed
-    log.info("weekly events found after prepare+time: %s", len(prepared))
+        stats.removed(str(e.get("title", "")), "missing_datetime")
+    stats.set("AFTER_TIME_LOCK", len(timed))
 
     eligible: list[dict[str, Any]] = []
-    for e in prepared:
+    for e in timed:
         floor = min_watchability_for_event(e, default_min=RADAR_MIN_WATCHABILITY)
         score = int(e.get("watchability_score", 0))
         if score >= floor:
             eligible.append(e)
-        elif is_major_weekly_event(e) and score >= max(28, floor - 10):
-            log.info(
-                "weekly major event below floor but kept: title=%r score=%s floor=%s",
-                e.get("title"),
-                score,
-                floor,
-            )
+        elif is_major_weekly_event(e) and score >= max(16, floor - 16):
             eligible.append(e)
         else:
-            log.info(
-                "weekly skipped event: title=%r reason=low_watchability score=%s floor=%s major=%s",
-                e.get("title"),
-                score,
-                floor,
-                is_major_weekly_event(e),
+            stats.removed(
+                str(e.get("title", "")),
+                f"score_too_low score={score} floor={floor}",
             )
+    stats.set("AFTER_SCORE_FILTER", len(eligible))
 
-    deduped = dedupe_events(eligible, log_prefix="weekly_select")
+    deduped = dedupe_events(eligible, log_prefix="weekly_select", exact=True)
+    stats.set("AFTER_DEDUPE", len(deduped))
 
     f1: list[dict[str, Any]] = []
     nba: list[dict[str, Any]] = []
@@ -1055,19 +1061,17 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
             is_major_weekly_event(e),
         )
 
-    out.sort(key=sort_key_verified)
     out.sort(key=_watchability_sort_key)
+    stats.set("FINAL", len(out))
+    stats.flush_summary()
     log.info(
-        "weekly radar selection: prepared=%s eligible=%s deduped=%s selected=%s "
-        "f1=%s nba=%s nhl=%s football=%s (no hard cap, min_watchability=%s)",
-        len(prepared),
-        len(eligible),
-        len(deduped),
-        len(out),
+        "weekly radar selection: f1=%s nba=%s nhl=%s football=%s live=%s "
+        "(min_watchability=%s, no hard cap)",
         len(f1),
         len(nba),
         len(nhl),
         len(football),
+        len(live),
         RADAR_MIN_WATCHABILITY,
     )
     return out
@@ -1105,7 +1109,7 @@ async def _lock_events_from_sports_program(
             locked.append(_prepare_for_afisha_selection(le))
         else:
             log.info("%s: lock failed title=%r", phase, ev.get("title"))
-    return filter_radar_events(locked, phase=phase)
+    return filter_radar_events(locked, phase=phase, allow_gemini_discovery=True)
 
 
 async def _api_sports_weekly_seed() -> tuple[list[dict[str, Any]], int]:
@@ -1264,22 +1268,26 @@ async def _fetch_radar_pipeline(
         )
         verified_all = merged
 
-    verified_all = filter_radar_events(verified_all, phase="pipeline_final")
+    verified_all = filter_radar_events(
+        verified_all, phase="pipeline_final", allow_gemini_discovery=True
+    )
 
-    verified_prio = [v for v in verified_all if int(v.get("radar_tier", 99)) < RADAR_TIER_LOW]
-    if len(verified_prio) >= RADAR_WEEKLY_TARGET_MIN:
-        pool = verified_prio
-    else:
-        pool = [v for v in verified_all if not gastrobar_hard_reject(v)]
-        if len(verified_prio) < len(pool):
-            log.warning(
-                "Event Radar: tier filter kept %s/%s — using full verified pool for rich weekly",
-                len(verified_prio),
-                len(pool),
-            )
-        for v in pool:
-            if v.get("radar_priority", 0) < 1:
-                v["radar_priority"] = 2
+    pool = [
+        v
+        for v in verified_all
+        if int(v.get("radar_tier", 99)) < 99 and not gastrobar_hard_reject(v)
+    ]
+    for v in pool:
+        if v.get("radar_priority", 0) < 1:
+            v["radar_priority"] = 2
+
+    log.info(
+        "WEEKLY_PIPELINE pipeline_final: AFTER_RADAR_VALIDATE=%s "
+        "AFTER_TIER_DROP=%s (dropped_tier99=%s)",
+        len(verified_all),
+        len(pool),
+        len(verified_all) - len(pool),
+    )
 
     verify_dropped = stats["verify_failed"] + stats["low_confidence"]
     log.info(
@@ -1361,7 +1369,13 @@ async def get_event_radar_week(
         force_gemini=force_refresh
     )
     final = _finalize_week_selection(pool, prelim)
-    log.info("Event Radar week final=%s note=%s", len(final), fetch_note)
+    log.info(
+        "Event Radar week: FOUND(raw_api)=%s POOL=%s FINAL=%s note=%s",
+        raw_total,
+        len(pool),
+        len(final),
+        fetch_note,
+    )
 
     if not final and fetch_note in ("gemini_quota", "gemini_error", "gemini_overloaded"):
         cached = await get_weekly_events_cache_for_display()
@@ -1380,7 +1394,7 @@ async def get_event_radar_week(
 
     if final:
         await save_weekly_events_cache(final, source="weekly_radar")
-    return final, raw_total, len(prelim), len(final), fetch_note
+    return final, raw_total, len(pool), len(final), fetch_note
 
 
 async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, str | None]:
