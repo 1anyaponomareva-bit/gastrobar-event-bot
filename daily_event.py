@@ -261,44 +261,37 @@ def select_now24_events(
     *,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Сильные события в ближайшие 24 ч; без добивания слабым хвостом."""
-    from gastrobar_event_filter import (
-        passes_gastrobar_content_filters,
-        passes_gastrobar_watchability_floor,
+    """NOW24 из того же normalized pool: окно 24 ч, сортировка по datetime."""
+    from event_radar_pipeline import (
+        cap_now24_chronological,
+        in_time_window,
+        normalize_radar_event,
+        sort_events_chronological,
     )
-    from next24 import is_in_next24_window, log_next24_window_header
+    from next24 import log_next24_window_header
 
     now = now or _vn_now()
     pool = events or []
-    candidates: list[dict[str, Any]] = []
-
     log_next24_window_header(now)
 
+    candidates: list[dict[str, Any]] = []
     for e in pool:
-        ok, ev = passes_gastrobar_content_filters(e)
-        if not ok:
+        ne = normalize_radar_event(dict(e))
+        if ne is None:
             continue
-        if not passes_gastrobar_watchability_floor(ev):
+        if not in_time_window(ne, "now24", now=now):
             continue
-        if not is_in_next24_window(ev, now=now, log_checks=True):
-            continue
-        candidates.append(enrich_daily_campaign_meta(ev, now))
+        candidates.append(ne)
 
     if not candidates:
         return []
 
     candidates = _prune_weak_rpl_if_strong_alternatives(candidates)
-
-    candidates.sort(
-        key=lambda x: event_start_datetime_vn(x) or datetime.max.replace(tzinfo=TZ),
-    )
-    from config import NOW24_MAX_ITEMS, NOW24_MIN_ITEMS
-
-    selected = _select_now24_balanced(
-        candidates,
-        limit=NOW24_MAX_ITEMS,
-        min_items=NOW24_MIN_ITEMS,
-    )
+    selected = cap_now24_chronological(candidates)
+    selected = [
+        enrich_daily_campaign_meta(e, now)
+        for e in sort_events_chronological(selected)
+    ]
     for e in selected:
         dt = event_start_datetime_vn(e)
         log.info(

@@ -76,7 +76,9 @@ async def enrich_weekly_football_times(events: list[dict[str, Any]]) -> list[dic
     for ev in events:
         blob = f"{ev.get('title','')} {ev.get('league','')} {ev.get('subtitle','')}".lower()
         if "foot" not in str(ev.get("category", "")).lower() and not re.search(
-            r"premier|europa|champions|liga|serie|bundeslig", blob, re.I
+            r"premier|europa|\bchampions\s+league\b|\bucl\b|liga|serie|bundeslig",
+            blob,
+            re.I,
         ):
             out.append(ev)
             continue

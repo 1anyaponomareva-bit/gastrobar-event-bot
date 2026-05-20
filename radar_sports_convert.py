@@ -28,10 +28,40 @@ _SPORT_CATEGORY = {
     "hockey": ("HOCKEY", "🏒"),
     "basketball": ("BASKETBALL", "🏀"),
     "formula1": ("SPORTS", "🏎"),
+    "f1": ("SPORTS", "🏎"),
     "esports": ("ESPORTS", "🎮"),
     "mma": ("SPORTS", "🥊"),
     "boxing": ("SPORTS", "🥊"),
 }
+
+
+def _resolve_program_sport(
+    item: dict[str, Any],
+    *,
+    title: str = "",
+    subtitle: str = "",
+) -> str:
+    sport = str(item.get("sport", "") or "").strip().lower()
+    if sport in ("f1",):
+        return "formula1"
+    if sport and sport not in ("misc", "other", ""):
+        return sport
+    blob = f"{title} {subtitle}".lower()
+    if re.search(r"\b(nhl|khl|stanley|hockey|iihf|world\s+championship)\b", blob, re.I):
+        return "hockey"
+    if re.search(
+        r"\b(formula\s*1|grand\s+prix|qualifying|practice|sprint\s+race|fp[123])\b",
+        blob,
+        re.I,
+    ):
+        return "formula1"
+    if re.search(r"\b(cs2|dota|esports|valorant|dreamleague|blast|major|esl)\b", blob, re.I):
+        return "esports"
+    if re.search(r"\bnba\b", blob, re.I):
+        return "basketball"
+    if re.search(r"\bvs\.?\b", title, re.I):
+        return "football"
+    return sport or "misc"
 
 
 def program_item_to_radar_event(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -70,7 +100,7 @@ def program_item_to_radar_event(item: dict[str, Any]) -> dict[str, Any] | None:
         return None
     subtitle = str(item.get("league_label_ru", item.get("league_raw", item.get("league", "")))).strip()
     tier = str(item.get("tier", "high")).lower()
-    sport = str(item.get("sport", "football")).lower()
+    sport = _resolve_program_sport(item, title=title, subtitle=subtitle)
     cat, default_emoji = _SPORT_CATEGORY.get(sport, ("SPORTS", "🏟"))
     raw_em = item.get("emoji")
     emoji = (
@@ -81,6 +111,7 @@ def program_item_to_radar_event(item: dict[str, Any]) -> dict[str, Any] | None:
     ev: dict[str, Any] = {
         "date": date_s,
         "time": time_s,
+        "sport": sport,
         "weekday": _weekday_ru_for_date(d_obj),
         "category": cat,
         "title": title,
@@ -110,7 +141,9 @@ def lock_football_fixture_event(
     iso = str(item.get("fixture_utc_iso") or "").strip()
     if not iso:
         return None
-    sport = str(item.get("sport", "football")).lower()
+    title_s = str(item.get("title", ""))
+    league_s = str(item.get("league", ""))
+    sport = _resolve_program_sport(item, title=title_s, subtitle=league_s)
     pi: dict[str, Any] = {
             "kind": "match",
             "sport": sport,

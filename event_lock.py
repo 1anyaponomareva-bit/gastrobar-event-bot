@@ -222,18 +222,24 @@ def format_locked_weekly_afisha(
     *,
     section_title: str = "🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
     now24: bool = False,
+    chronological: bool = True,
 ) -> str:
     """
     Чистое Python-форматирование locked списка (без Gemini).
-    Группировка EPL matchday — только на этапе отображения, lock_id сохраняются.
+    По умолчанию — строго по времени; day_label = СЕГОДНЯ/ЗАВТРА/ПТ.
     """
     from event_grouping import apply_grouping_for_weekly_display, format_parallel_block_lines
+    from event_radar_pipeline import enrich_events_for_display
 
     if not locked:
         return "Пока нет событий в подборке."
 
     events = locked_events_to_dicts(locked)
-    display = apply_grouping_for_weekly_display(events, collapse_blocks=not now24)
+    events = enrich_events_for_display(events)
+    if chronological:
+        display = events
+    else:
+        display = apply_grouping_for_weekly_display(events, collapse_blocks=not now24)
 
     lines = [section_title, ""]
 
@@ -244,7 +250,7 @@ def format_locked_weekly_afisha(
             continue
 
         em = str(e.get("emoji", "🏟")).strip()
-        wd = str(e.get("local_weekday") or e.get("weekday", "")).strip()
+        wd = str(e.get("day_label") or e.get("local_weekday") or e.get("weekday", "")).strip()
         tm = str(e.get("local_time") or e.get("display_time", "")).strip()
         title = _normalize_now24_match_title(
             str(e.get("title", "")).strip(),

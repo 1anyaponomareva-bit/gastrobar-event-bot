@@ -1093,7 +1093,9 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
             is_major_weekly_event(e),
         )
 
-    out.sort(key=_watchability_sort_key)
+    from event_radar_pipeline import sort_events_chronological
+
+    out = sort_events_chronological(out)
     stats.set("FINAL", len(out))
     stats.flush_summary()
     log.info(
@@ -1230,9 +1232,19 @@ async def _fetch_radar_pipeline(
     raw_total = max(api_raw, gemini_raw)
 
     if skip_gemini and api_seed:
+        from event_radar_pipeline import get_week_from_pipeline
+
+        final_pre, api_raw_u, note_u = await get_week_from_pipeline()
+        if final_pre:
+            log.info(
+                "WEEKLY_PIPELINE API_UNIFIED: raw=%s final=%s",
+                api_raw_u,
+                len(final_pre),
+            )
+            return final_pre, api_raw_u, [], note_u or fetch_note
         pool = [e for e in api_seed if not gastrobar_hard_reject(e)]
         log.info(
-            "WEEKLY_PIPELINE API_ONLY: FOUND(raw_api)=%s SEED=%s POOL=%s",
+            "WEEKLY_PIPELINE API_ONLY fallback: FOUND(raw_api)=%s SEED=%s POOL=%s",
             api_raw,
             len(api_seed),
             len(pool),
@@ -1459,54 +1471,46 @@ async def get_event_radar_week(
 
 
 async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, str | None]:
-    """События ближайших 24 ч: API-SPORTS (football) → cache → pipeline."""
+    """NOW24 и WEEK из одного normalized pool (event_radar_pipeline)."""
     from daily_event import select_now24_events, select_nearest_upcoming
+    from event_radar_pipeline import build_master_radar_pool, get_now24_from_pipeline
     from next24 import log_next24_window_header
-    from now24_sources import fetch_now24_from_api_sports
     from weekly_events_cache import load_weekly_events_cache
 
     log_next24_window_header()
 
-    api_pool = await fetch_now24_from_api_sports()
-    api_n = len(api_pool)
-    if api_pool:
-        final = select_now24_events(api_pool)
-        if final:
-            log.info("Event Radar now24 from API-SPORTS: %s", len(final))
-            return final, api_n, api_n, len(final), "api_sports_now24"
-        log.warning(
-            "Event Radar now24: API pool=%s but selected=0 after filters/window",
-            api_n,
-        )
-        return [], api_n, api_n, 0, "api_filter_empty"
+    final, raw_total, note = await get_now24_from_pipeline()
+    if final:
+        log.info("Event Radar now24 unified pipeline: %s", len(final))
+        return final, raw_total, raw_total, len(final), note or "api_unified"
 
     cached = await load_weekly_events_cache()
     if cached:
         final = select_now24_events(cached)
-        log.info(
-            "Event Radar now24 from weekly cache: pool=%s final=%s",
-            len(cached),
-            len(final),
-        )
         if final:
+            log.info("Event Radar now24 from cache slice: %s", len(final))
             return final, len(cached), len(cached), len(final), "weekly_cache"
         if len(cached) > 0:
             return [], len(cached), len(cached), 0, "api_filter_empty"
 
+    master, _ = await build_master_radar_pool(stats_label="radar_now24_retry")
+    if master:
+        final = select_now24_events(master)
+        if final:
+            return final, len(master), len(master), len(final), "api_unified"
+
     pool, raw_total, prelim, fetch_note = await _fetch_radar_pipeline()
     final = select_now24_events(pool)
     if final:
-        log.info("Event Radar now24 pipeline final=%s", len(final))
         return final, raw_total, len(prelim), len(final), fetch_note
 
     if cached:
         upcoming = select_nearest_upcoming(cached, within_days=2)
         final = select_now24_events(upcoming)
         if final:
-            log.info("Event Radar now24 nearest from cache: %s", len(final))
             return final, len(cached), len(cached), len(final), "weekly_cache_upcoming"
 
-    log.info("Event Radar now24: empty (cache=%s api=%s pool=%s)", len(cached), len(api_pool), len(pool))
+    log.info("Event Radar now24: empty raw=%s pool=%s", raw_total, len(pool))
     return [], raw_total, len(prelim), 0, fetch_note
 
 
@@ -1531,26 +1535,22 @@ def format_radar_afisha(
 
 
 def format_radar_week_message(events: list[dict[str, Any]]) -> str:
+    from event_radar_pipeline import enrich_events_for_display, sort_events_chronological
+
+    sorted_ev = enrich_events_for_display(sort_events_chronological(events))
     body = format_radar_afisha(
-        events,
+        sorted_ev,
         section_title="🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
     )
     return f"🔭 Event Radar · Week\n\n{body}"
 
 
 def format_radar_now24_message(events: list[dict[str, Any]]) -> str:
-    from config import TIMEZONE, is_local_run
-    from datetime import datetime
-    from next24 import resolve_event_local_datetime_vn
+    from config import is_local_run
+    from event_radar_pipeline import enrich_events_for_display, sort_events_chronological
     from runtime_messages import build_tag_line
-    from zoneinfo import ZoneInfo
 
-    tz = ZoneInfo(TIMEZONE)
-    sorted_ev = sorted(
-        events,
-        key=lambda e: resolve_event_local_datetime_vn(e)
-        or datetime.max.replace(tzinfo=tz),
-    )
+    sorted_ev = enrich_events_for_display(sort_events_chronological(events))
     body = format_radar_afisha(
         sorted_ev,
         section_title="⚡ СОБЫТИЯ В БЛИЖАЙШИЕ 24 ЧАСА",
