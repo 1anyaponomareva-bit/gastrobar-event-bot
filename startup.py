@@ -55,8 +55,6 @@ def log_startup_banner() -> None:
     log.info("GEMINI_API_KEY loaded: %s", "yes" if GEMINI_API_KEY else "no")
     log.info("GEMINI_MODEL: %s", effective_gemini_model())
     if is_railway_run():
-        import os
-
         log.info(
             "Railway (optional): RAILWAY_ENVIRONMENT=%r RAILWAY_SERVICE_NAME=%r",
             os.getenv("RAILWAY_ENVIRONMENT"),
