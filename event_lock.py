@@ -13,6 +13,14 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 _TIME_OK_RE = re.compile(r"^(≈)?\d{1,2}:\d{2}$")
+_GOLDEN_KNIGHT_FIX = re.compile(r"\bGolden Knight\b")
+
+
+def _normalize_now24_match_title(title: str, *, now24: bool) -> str:
+    """Исправление известных опечаток API в строке матча (Next24)."""
+    if not now24 or not title:
+        return title
+    return _GOLDEN_KNIGHT_FIX.sub("Golden Knights", title)
 
 
 def has_confirmed_vn_time(e: dict[str, Any]) -> bool:
@@ -129,6 +137,7 @@ def lock_events_for_formatter(
             continue
 
         title = str(e.get("title", "")).strip()
+        title = _normalize_now24_match_title(title, now24=(log_prefix == "now24_afisha"))
         if not title:
             continue
 
@@ -212,19 +221,19 @@ def format_locked_weekly_afisha(
     locked: list[LockedEvent],
     *,
     section_title: str = "🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
+    now24: bool = False,
 ) -> str:
     """
     Чистое Python-форматирование locked списка (без Gemini).
     Группировка EPL matchday — только на этапе отображения, lock_id сохраняются.
     """
     from event_grouping import apply_grouping_for_weekly_display, format_parallel_block_lines
-    from watchability import detect_editorial_type
 
     if not locked:
         return "Пока нет событий в подборке."
 
     events = locked_events_to_dicts(locked)
-    display = apply_grouping_for_weekly_display(events, collapse_blocks=True)
+    display = apply_grouping_for_weekly_display(events, collapse_blocks=not now24)
 
     lines = [section_title, ""]
 
@@ -237,7 +246,10 @@ def format_locked_weekly_afisha(
         em = str(e.get("emoji", "🏟")).strip()
         wd = str(e.get("local_weekday") or e.get("weekday", "")).strip()
         tm = str(e.get("local_time") or e.get("display_time", "")).strip()
-        title = str(e.get("title", "")).strip()
+        title = _normalize_now24_match_title(
+            str(e.get("title", "")).strip(),
+            now24=now24,
+        )
         sub = str(e.get("subtitle", e.get("league", ""))).strip()
 
         lines.append(f"{em} {wd} {tm}")

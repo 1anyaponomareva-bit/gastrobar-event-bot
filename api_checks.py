@@ -8,11 +8,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
-from config import GEMINI_API_KEY, SPORTS_API_KEY
+from config import GEMINI_API_KEY, SPORTS_API_KEY, TIMEZONE
 from gemini_client import effective_gemini_model, generate_radar_content_sync, log_gemini_error
 
 log = logging.getLogger(__name__)
@@ -62,56 +64,65 @@ async def check_sports_api() -> CheckResult:
         log.warning("API-SPORTS error: %s", msg)
         return CheckResult(name="API-SPORTS", ok=False, details=msg)
 
-    url = "https://v3.football.api-sports.io/fixtures?next=1"
+    date_vn = datetime.now(ZoneInfo(TIMEZONE)).date().isoformat()
+    urls = (
+        "https://v3.football.api-sports.io/fixtures?next=1",
+        f"https://v3.football.api-sports.io/fixtures?date={date_vn}",
+    )
     headers = {"x-apisports-key": SPORTS_API_KEY}
 
     try:
+        last_fail: str | None = None
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(url, headers=headers)
-        if r.status_code != 200:
-            msg = f"HTTP {r.status_code}: {r.text[:300]}"
-            log.error("API-SPORTS error: %s", msg)
-            return CheckResult(name="API-SPORTS", ok=False, details=msg)
+            for url in urls:
+                r = await client.get(url, headers=headers)
+                if r.status_code != 200:
+                    last_fail = f"HTTP {r.status_code}: {r.text[:300]}"
+                    log.error("API-SPORTS error (%s): %s", url, last_fail)
+                    continue
 
-        data: dict[str, Any] = r.json()
-        api_errors = data.get("errors")
-        if api_errors:
-            err_msg = str(api_errors)[:400]
-            log.error("API-SPORTS errors payload: %s", err_msg)
-            return CheckResult(
-                name="API-SPORTS",
-                ok=False,
-                details=f"errors из ответа API: {err_msg}",
-            )
+                data: dict[str, Any] = r.json()
+                api_errors = data.get("errors")
+                if api_errors:
+                    err_msg = str(api_errors)[:400]
+                    log.error("API-SPORTS errors payload: %s", err_msg)
+                    return CheckResult(
+                        name="API-SPORTS",
+                        ok=False,
+                        details=f"errors из ответа API: {err_msg}",
+                    )
 
-        resp = data.get("response") or []
-        results_hint = data.get("results")
-        paging_info = data.get("paging")
+                resp = data.get("response") or []
+                results_hint = data.get("results")
+                paging_info = data.get("paging")
 
-        if not isinstance(resp, list):
-            msg = f"response не список: keys={list(data.keys())}"
-            log.warning("API-SPORTS error: %s", msg)
-            return CheckResult(name="API-SPORTS", ok=False, details=msg)
+                if not isinstance(resp, list):
+                    last_fail = f"response не список: keys={list(data.keys())}"
+                    log.warning("API-SPORTS (%s): %s", url, last_fail)
+                    continue
 
-        if not resp:
-            extra = f"results={results_hint} paging={paging_info}"
-            msg = f"пустой fixtures (план/лимит ключа). {extra}"
-            log.warning("API-SPORTS error: %s", msg)
-            return CheckResult(name="API-SPORTS", ok=False, details=msg)
+                if not resp:
+                    extra = f"results={results_hint} paging={paging_info}"
+                    last_fail = f"пустой response. {extra} url={url}"
+                    log.warning("API-SPORTS: %s", last_fail)
+                    continue
 
-        item = resp[0] or {}
-        league = (item.get("league") or {}).get("name") or "Unknown league"
-        teams = item.get("teams") or {}
-        home = (teams.get("home") or {}).get("name") or "Home"
-        away = (teams.get("away") or {}).get("name") or "Away"
-        fixture = item.get("fixture") or {}
-        dt = fixture.get("date") or ""
+                item = resp[0] or {}
+                league = (item.get("league") or {}).get("name") or "Unknown league"
+                teams = item.get("teams") or {}
+                home = (teams.get("home") or {}).get("name") or "Home"
+                away = (teams.get("away") or {}).get("name") or "Away"
+                fixture = item.get("fixture") or {}
+                dt = fixture.get("date") or ""
 
-        log.info("API-SPORTS connected")
-        log.info("API-SPORTS sample: %s | %s vs %s | %s", league, home, away, dt)
+                log.info("API-SPORTS connected via %s", url)
+                log.info("API-SPORTS sample: %s | %s vs %s | %s", league, home, away, dt)
 
-        details = f"⚽ {home} vs {away}\n{league}\n{dt}"
-        return CheckResult(name="API-SPORTS", ok=True, details=details)
+                details = f"⚽ {home} vs {away}\n{league}\n{dt}"
+                return CheckResult(name="API-SPORTS", ok=True, details=details)
+
+        msg = last_fail or "не удалось получить fixtures (next и date)"
+        return CheckResult(name="API-SPORTS", ok=False, details=msg)
     except Exception as e:
         msg = _safe_err(e)
         log.error("API-SPORTS error: %s", msg)

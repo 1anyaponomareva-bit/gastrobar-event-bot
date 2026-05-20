@@ -386,6 +386,23 @@ def _nhl_watchability(b: str, title: str) -> tuple[int, str]:
             score += min(nations * 8, 24)
             reasons.append(f"nations×{nations}")
 
+    if "khl" in b or "kontinental" in b:
+        score += 20
+        reasons.append("khl")
+        for club in (
+            "ska",
+            "cska",
+            "ak bars",
+            "metallurg",
+            "avangard",
+            "dynamo moscow",
+            "severstal",
+        ):
+            if club in b:
+                score += 8
+                reasons.append("khl_ru_club")
+                break
+
     if has_matchup_in_title(title):
         score += 22
         reasons.append("matchup")

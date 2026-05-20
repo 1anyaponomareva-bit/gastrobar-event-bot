@@ -11,11 +11,33 @@ _ROOT = Path(__file__).resolve().parent
 load_dotenv(_ROOT / ".env")
 load_dotenv()  # поверх: переменные из окружения процесса / текущей папки
 
+
+def _env_first_nonempty(*keys: str) -> str:
+    """Первая непустая переменная; снимает кавычки при копипасте из UI."""
+    for key in keys:
+        raw = os.getenv(key)
+        if raw is None:
+            continue
+        v = str(raw).strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1].strip()
+        if v:
+            return v
+    return ""
+
+
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "").strip()
 ADMIN_ID: int = int(os.getenv("ADMIN_ID", "0") or 0)
 GASTROBAR_GROUP_ID: int = int(os.getenv("GASTROBAR_GROUP_ID", "0") or 0)
-SPORTS_API_KEY: str = os.getenv("SPORTS_API_KEY", "").strip()
+# Один ключ API-Football / API-SPORTS; дублирующие имена — на случай опечаток в Railway
+SPORTS_API_KEY: str = _env_first_nonempty(
+    "SPORTS_API_KEY",
+    "APISPORTS_API_KEY",
+    "API_FOOTBALL_KEY",
+    "APIFOOTBALL_KEY",
+    "FOOTBALL_API_KEY",
+)
 
 # Пустая переменная на Railway → default gemini-2.5-flash
 GEMINI_MODEL: str = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()

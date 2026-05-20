@@ -5,7 +5,7 @@ from __future__ import annotations
 from config import GEMINI_API_KEY, RUN_MODE, is_local_run, is_railway_run
 
 # Меняйте при деплое — по этой метке видно, какой код ответил в Telegram.
-BOT_BUILD_ID = "sports-key-startup-log-20260520"
+BOT_BUILD_ID = "next24-chrono-mixed-rpl-20260521"
 
 GEMINI_TROUBLESHOOT = (
     "Проверьте GEMINI_API_KEY через /check и посмотрите логи в терминале, "

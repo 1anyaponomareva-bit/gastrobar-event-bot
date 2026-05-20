@@ -21,6 +21,7 @@ _DOMESTIC_TOP: dict[int, str] = {
     135: "italy",  # Serie A
     78: "germany",  # Bundesliga
     61: "france",  # Ligue 1
+    235: "russia",  # Russian Premier League (API-SPORTS)
 }
 
 _UEFA_CUPS = frozenset({2, 3, 848})  # UCL, UEL, UECL
@@ -42,6 +43,8 @@ _INTL_TOURNAMENTS = frozenset(
 )
 
 _CHAMPIONSHIP_ENGLAND = 40
+# Russian Premier League (API-SPORTS)
+_RPL_LEAGUE_ID = 235
 
 _LEAGUE_BASE_SCORE: dict[int, int] = {
     2: 88,
@@ -53,6 +56,7 @@ _LEAGUE_BASE_SCORE: dict[int, int] = {
     78: 72,
     61: 68,
     _CHAMPIONSHIP_ENGLAND: 56,
+    _RPL_LEAGUE_ID: 58,
     1: 92,
     4: 90,
     5: 74,
@@ -79,6 +83,23 @@ _TOP_NATIONAL_TEAMS = (
     "japan",
     "south korea",
     "australia",
+)
+
+_RUSSIAN_CLUB_MARKERS = (
+    "zenit",
+    "spartak",
+    "cska",
+    "lokomotiv",
+    "krasnodar",
+    "dinamo moscow",
+    "dinamo",
+    "dynamo moscow",
+    "dynamo",
+    "rubin",
+    "rostov",
+    "ural",
+    "sochi",
+    "akhmat",
 )
 
 _REJECT_LEAGUE_RE = re.compile(
@@ -123,16 +144,22 @@ def _blob(item: dict[str, Any], event: dict[str, Any] | None = None) -> str:
 
 
 def is_eligible_football_league_now24(item: dict[str, Any]) -> bool:
-    """Жёсткий allowlist: только топ-лиги / еврокубки / крупные сборные."""
+    """Жёсткий allowlist: только топ-лиги / еврокубки / крупные сборные / РПЛ и Кубок РФ."""
     league = str(item.get("league", "")).lower()
     if _REJECT_LEAGUE_RE.search(league):
         return False
 
+    country = str(item.get("league_country", "")).strip().lower()
     lid = _league_id(item)
+
+    if country == "russia":
+        if lid == _RPL_LEAGUE_ID:
+            return True
+        if re.search(r"\b(cup|кубок|super\s*cup|supercup)\b", league, re.I):
+            return True
+
     if lid is None:
         return False
-
-    country = str(item.get("league_country", "")).strip().lower()
 
     if lid == _CHAMPIONSHIP_ENGLAND:
         return country == "england"
@@ -160,16 +187,30 @@ def football_watchability_score(
     b = _blob(item, event)
     title = str((event or item).get("title", "")).strip()
     league = str(item.get("league", "")).lower()
+    country = str(item.get("league_country", "")).strip().lower()
     lid = _league_id(item) or 0
 
     if _REJECT_LEAGUE_RE.search(b):
         return 0, "rejected_marker"
 
-    score = _LEAGUE_BASE_SCORE.get(lid, 50)
-    reasons: list[str] = [f"league_{lid}"]
+    is_ru_cup = country == "russia" and lid != _RPL_LEAGUE_ID and re.search(
+        r"\b(cup|кубок|super\s*cup|supercup)\b",
+        league,
+        re.I,
+    )
+    if is_ru_cup:
+        score = 52
+        reasons: list[str] = ["ru_cup"]
+    else:
+        score = _LEAGUE_BASE_SCORE.get(lid, 50)
+        reasons = [f"league_{lid}"]
 
     if lid in _UEFA_CUPS:
         reasons.append("uefa")
+        ru_clubs = _count_tokens(b + " " + title.lower(), _RUSSIAN_CLUB_MARKERS)
+        if ru_clubs:
+            score += min(ru_clubs * 8, 20)
+            reasons.append(f"ru_club×{ru_clubs}")
         if _PLAYOFF_FINAL_RE.search(league):
             score += 12
             reasons.append("knockout")
@@ -209,19 +250,34 @@ def football_watchability_score(
         score += 10
         reasons.append("playoff_stage")
 
-    # «Premier League» без England — отсекаем на уровне eligibility, но страховка
-    if "premier league" in league and str(item.get("league_country", "")).lower() != "england":
+    # «Premier League» не Англия/Россия — подделка
+    if "premier league" in league and country not in ("england", "russia"):
         return 0, "fake_premier_league"
 
     if "ligue 1" in league and country != "france":
         return 0, "ligue1_not_france"
 
     score = min(100, max(0, score))
-    if clubs == 0 and lid in _DOMESTIC_TOP and not _PLAYOFF_FINAL_RE.search(league):
+    ru_hit = _count_tokens(b + " " + title.lower(), _RUSSIAN_CLUB_MARKERS)
+    if (
+        clubs == 0
+        and lid in _DOMESTIC_TOP
+        and lid != _RPL_LEAGUE_ID
+        and not _PLAYOFF_FINAL_RE.search(league)
+    ):
         # Два малоизвестных клуба даже в АПЛ — слабо для now24
         if score < 55:
             score = max(0, score - 8)
             reasons.append("weak_domestic_pair")
+    elif (
+        clubs == 0
+        and lid == _RPL_LEAGUE_ID
+        and not ru_hit
+        and not _PLAYOFF_FINAL_RE.search(league)
+    ):
+        if score < 54:
+            score = max(0, score - 10)
+            reasons.append("weak_rpl_pair")
 
     return score, "+".join(reasons)
 

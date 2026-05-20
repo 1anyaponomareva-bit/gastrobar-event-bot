@@ -167,13 +167,15 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
 
     out = dedupe_events(out, log_prefix="now24_api_multi", exact=True)
 
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from next24 import resolve_event_local_datetime_vn
+
+    tz = ZoneInfo("Asia/Ho_Chi_Minh")
     out.sort(
-        key=lambda x: (
-            -int(x.get("football_watchability_score", 0)),
-            -int(x.get("watchability_score", 0)),
-            str(x.get("local_date") or x.get("date", "")),
-            str(x.get("local_time") or x.get("time", "")),
-        )
+        key=lambda x: resolve_event_local_datetime_vn(x)
+        or datetime.max.replace(tzinfo=tz),
     )
-    log.info("NOW24_API AFTER_DEDUPE=%s (exact keys)", len(out))
+    log.info("NOW24_API AFTER_DEDUPE=%s (exact keys, time-sorted)", len(out))
     return out

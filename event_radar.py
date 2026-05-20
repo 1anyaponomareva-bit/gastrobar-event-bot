@@ -1495,13 +1495,19 @@ def format_radar_afisha(
     *,
     section_title: str = "🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
     apply_grouping: bool = False,
+    now24: bool = False,
 ) -> str:
     """Weekly афиша: подробный список событий (без AI digest / схлопывания)."""
     from event_lock import format_locked_weekly_afisha, lock_events_for_formatter
 
-    locked = lock_events_for_formatter(events, log_prefix="weekly_afisha")
+    prefix = "now24_afisha" if now24 else "weekly_afisha"
+    locked = lock_events_for_formatter(events, log_prefix=prefix)
     log.info("FORMATTER RECEIVED EVENTS: count=%s", len(locked))
-    return format_locked_weekly_afisha(locked, section_title=section_title)
+    return format_locked_weekly_afisha(
+        locked,
+        section_title=section_title,
+        now24=now24,
+    )
 
 
 def format_radar_week_message(events: list[dict[str, Any]]) -> str:
@@ -1513,12 +1519,22 @@ def format_radar_week_message(events: list[dict[str, Any]]) -> str:
 
 
 def format_radar_now24_message(events: list[dict[str, Any]]) -> str:
-    from config import is_local_run
+    from config import TIMEZONE, is_local_run
+    from datetime import datetime
+    from next24 import resolve_event_local_datetime_vn
     from runtime_messages import build_tag_line
+    from zoneinfo import ZoneInfo
 
-    body = format_radar_afisha(
+    tz = ZoneInfo(TIMEZONE)
+    sorted_ev = sorted(
         events,
+        key=lambda e: resolve_event_local_datetime_vn(e)
+        or datetime.max.replace(tzinfo=tz),
+    )
+    body = format_radar_afisha(
+        sorted_ev,
         section_title="⚡ СОБЫТИЯ В БЛИЖАЙШИЕ 24 ЧАСА",
+        now24=True,
     )
     msg = f"⚡ Event Radar · Next 24h\n\n{body}"
     if is_local_run():
@@ -1526,7 +1542,32 @@ def format_radar_now24_message(events: list[dict[str, Any]]) -> str:
     return msg
 
 
-def radar_fetch_header(fetch_note: str | None) -> str:
+def _now24_api_sports_source_header(events: list[dict[str, Any]] | None) -> str:
+    """Подпись источника для Next24 из API-SPORTS: смешанные виды спорта vs только футбол."""
+    from watchability import detect_editorial_type
+
+    hdr = "⚡ Event Radar · Next 24h\nИсточник:"
+    if not events:
+        return f"{hdr} API-SPORTS."
+
+    kinds: set[str] = set()
+    for e in events:
+        et = str(e.get("editorial_type") or "").strip().lower()
+        if not et:
+            et = detect_editorial_type(e)
+        kinds.add(et or "other")
+
+    if len(kinds) >= 2:
+        return f"{hdr} API-SPORTS / mixed sports."
+    if kinds == {"football"}:
+        return f"{hdr} API-SPORTS (топ-футбол)."
+    return f"{hdr} API-SPORTS."
+
+
+def radar_fetch_header(
+    fetch_note: str | None,
+    events: list[dict[str, Any]] | None = None,
+) -> str:
     if fetch_note == "search_fallback":
         return "🔭 Event Radar · Gemini (fallback)\nGoogle Search недоступен."
     if fetch_note == "sports_fallback":
@@ -1541,7 +1582,7 @@ def radar_fetch_header(fetch_note: str | None) -> str:
     if fetch_note == "weekly_cache_quota":
         return "⚠️ Gemini лимит исчерпан. Показываю последнюю сохранённую афишу."
     if fetch_note == "api_sports_now24":
-        return "⚡ Event Radar · Next 24h\nИсточник: API-SPORTS (топ-футбол)."
+        return _now24_api_sports_source_header(events)
     return ""
 
 

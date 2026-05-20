@@ -480,7 +480,7 @@ async def _run_radar_mode(
             mode, events, {"raw_total": raw_total, "selected": selected}
         )
 
-        extra = radar_fetch_header(fetch_note)
+        extra = radar_fetch_header(fetch_note, events if mode == "now24" else None)
         found_n = pre_count if mode == "week" and pre_count else raw_total
         stats = f"{_ru_found_events_line(found_n)}\n{_ru_selected_main_line(selected)}"
         body = (

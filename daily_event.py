@@ -25,6 +25,8 @@ TZ = ZoneInfo(TIMEZONE)
 # События 00:00–09:59 — пост можно готовить накануне.
 MORNING_CUTOFF_HOUR = 10
 
+_RPL_LEAGUE_ID = 235  # Russian Premier League (API-SPORTS)
+
 
 def _vn_now() -> datetime:
     return datetime.now(TZ)
@@ -132,6 +134,54 @@ def _now24_bucket(ev: dict[str, Any]) -> str:
     return "other"
 
 
+def _prune_weak_rpl_if_strong_alternatives(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Слабые матчи РПЛ не показываем, если в окне уже есть заметно более сильные эфиры
+    (еврокубки, топ-футбол, NHL/F1 и т.д.).
+    """
+    from watchability import detect_editorial_type
+
+    if len(candidates) < 6:
+        return candidates
+
+    def strength(e: dict[str, Any]) -> int:
+        et = detect_editorial_type(e)
+        fs = int(e.get("football_watchability_score", 0))
+        ws = int(e.get("watchability_score", 0))
+        if et == "f1":
+            return 95
+        if et == "nhl" and ws >= 42:
+            return 82
+        if et == "football" and fs >= 74:
+            return 90
+        if et == "football" and fs >= 64:
+            return 72
+        if et == "nba":
+            return 68
+        return ws
+
+    if max((strength(e) for e in candidates), default=0) < 72:
+        return candidates
+
+    out: list[dict[str, Any]] = []
+    for e in candidates:
+        try:
+            lid = int(e.get("league_id") or 0)
+        except (TypeError, ValueError):
+            lid = 0
+        fs = int(e.get("football_watchability_score", 0))
+        if (
+            detect_editorial_type(e) == "football"
+            and lid == _RPL_LEAGUE_ID
+            and fs < 54
+        ):
+            continue
+        out.append(e)
+    return out if len(out) >= 4 else candidates
+
+
 def _select_now24_balanced(
     candidates: list[dict[str, Any]],
     *,
@@ -191,6 +241,10 @@ def _select_now24_balanced(
             if len(out) >= floor_cap:
                 break
             try_take(e)
+
+    out.sort(
+        key=lambda e: event_start_datetime_vn(e) or datetime.max.replace(tzinfo=TZ),
+    )
 
     log.info(
         "NOW24 FINAL_SELECTED=%s (limit=%s floor=%s candidates=%s)",
@@ -262,20 +316,26 @@ def select_now24_events(
     if not candidates:
         return []
 
+    candidates = _prune_weak_rpl_if_strong_alternatives(candidates)
+
     candidates.sort(
-        key=lambda x: (
-            -int(x.get("watchability_score", 0)),
-            _daily_priority_score(x),
-            event_start_datetime_vn(x) or datetime.max.replace(tzinfo=TZ),
-        )
+        key=lambda x: event_start_datetime_vn(x) or datetime.max.replace(tzinfo=TZ),
     )
     from config import NOW24_MAX_ITEMS, NOW24_MIN_ITEMS
 
-    return _select_now24_balanced(
+    selected = _select_now24_balanced(
         candidates,
         limit=NOW24_MAX_ITEMS,
         min_items=NOW24_MIN_ITEMS,
     )
+    for e in selected:
+        dt = event_start_datetime_vn(e)
+        log.info(
+            "NEXT24 SORTED: %s | %s",
+            dt.isoformat() if dt else "?",
+            e.get("title"),
+        )
+    return selected
 
 
 def collect_campaign_events(

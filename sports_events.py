@@ -16,11 +16,12 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from config import SPORTS_API_KEY
+from config import SPORTS_API_KEY, TIMEZONE
 
 
 def _today() -> date:
-    return date.today()
+    """Календарная дата в часовом поясе бара (Railway контейнер часто UTC)."""
+    return datetime.now(ZoneInfo(TIMEZONE)).date()
 
 
 def _week_dates() -> tuple[date, date]:
@@ -1236,6 +1237,15 @@ async def _get_json(url: str, *, headers: dict[str, str], timeout: float = 15.0)
     data = r.json()
     if not isinstance(data, dict):
         raise RuntimeError("Unexpected JSON payload")
+    errs = data.get("errors") or {}
+    # Квота/ключ часто приходят как HTTP 200 + errors + response: []
+    if errs:
+        log.warning(
+            "API-SPORTS errors for %s: %s (results=%s)",
+            url,
+            errs,
+            data.get("results"),
+        )
     return data
 
 
