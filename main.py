@@ -10,7 +10,7 @@ from typing import Any
 
 import aiogram
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramConflictError
+from aiogram.exceptions import TelegramConflictError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BotCommand,
@@ -951,7 +951,18 @@ async def main() -> None:
     await load_weekly_events_cache()
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     try:
-        me = await bot.get_me()
+        try:
+            me = await bot.get_me()
+        except TelegramUnauthorizedError:
+            logger.error(
+                "TELEGRAM_BOT_TOKEN отклонён Telegram (Revoke / неверный токен). "
+                "BotFather → новый токен → Railway Variables → Redeploy."
+            )
+            print(
+                "TELEGRAM_BOT_TOKEN invalid. Update token in Railway Variables and redeploy.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from None
         logger.info("Running bot username: @%s", me.username)
         logger.info("Running bot id: %s name: %r", me.id, me.full_name)
         _assert_expected_bot_username(me.username)
@@ -973,6 +984,11 @@ async def main() -> None:
             await run_polling(dp, bot)
         except TelegramConflictError:
             _fail_conflict("polling")
+        except TelegramUnauthorizedError:
+            logger.error(
+                "Polling: Unauthorized — обновите TELEGRAM_BOT_TOKEN в Railway и Redeploy."
+            )
+            raise SystemExit(1) from None
     finally:
         shutdown_scheduler()
         await bot.session.close()

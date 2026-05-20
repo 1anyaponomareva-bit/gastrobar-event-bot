@@ -65,6 +65,15 @@ powershell -File scripts\kill_bot.ps1
 
 Проверка в Telegram: `/start`, `/events`.
 
+### `TelegramUnauthorizedError` после Revoke в BotFather
+
+Старый токен **сразу** недействителен. Пока в **Variables** не вставлен **новый** токен и сервис не **Redeploy**, в логах будет `Unauthorized` (раньше — бесконечные retry).
+
+1. BotFather → бот → **API Token** → скопировать **новый** токен.
+2. **gastrobar-event-bot** → **Variables** → `TELEGRAM_BOT_TOKEN` → вставить **без кавычек**.
+3. **Deployments** → **Redeploy** (обязательно — иначе крутится старый контейнер).
+4. В логах: `Running bot username: @gastrobar_nhatrang_bot`, без `Unauthorized`.
+
 ### Ошибка «verification failed» при рабочем `/gemini_test`
 
 Это **не** обязательно проблема `GEMINI_API_KEY`: тест делает 1–2 вызова, а **афиша недели** гоняет цепочку поиска + **строгую проверку** каждого события. Для **футбола / UFC / части плей-офф NHL·NBA** без совпадения с **API-SPORTS** карточка может отбрасываться. Проверьте логи Railway: `rejected_unverified_event`, `verify_removed`, `Event Radar verify summary`. Убедитесь, что задан **`SPORTS_API_KEY`** и лимиты API-SPORTS/Gemini (free tier: не включайте **`RADAR_MULTI_SHARD`** без платного лимита).

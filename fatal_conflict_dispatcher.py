@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiogram import loggers
 from aiogram.dispatcher.dispatcher import DEFAULT_BACKOFF_CONFIG, Dispatcher
-from aiogram.exceptions import TelegramConflictError
+from aiogram.exceptions import TelegramConflictError, TelegramUnauthorizedError
 from aiogram.methods import GetUpdates
 from aiogram.utils.backoff import Backoff, BackoffConfig
 
@@ -86,6 +86,39 @@ def _exit_on_conflict(context: str) -> None:
     os._exit(1)
 
 
+def _exit_on_unauthorized(context: str) -> None:
+    loggers.dispatcher.error(
+        "%s: TelegramUnauthorizedError — неверный или отозванный TELEGRAM_BOT_TOKEN.",
+        context,
+    )
+    if is_railway_run():
+        print(
+            "\n"
+            + "=" * 62
+            + "\n"
+            + "  TelegramUnauthorizedError on Railway\n"
+            + "  1. BotFather → ваш бот → API Token → скопируйте НОВЫЙ токен\n"
+            + "  2. Railway → gastrobar-event-bot → Variables → TELEGRAM_BOT_TOKEN\n"
+            + "  3. Вставьте без кавычек и пробелов → Save → Redeploy\n"
+            + "  4. Дождитесь нового деплоя (старый контейнер после Revoke даёт Unauthorized)\n"
+            + "=" * 62
+            + "\n",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "\n"
+            + "=" * 62
+            + "\n"
+            + "  TELEGRAM_BOT_TOKEN недействителен (Revoke в BotFather?)\n"
+            + "  Обновите .env и перезапустите start_bot.bat\n"
+            + "=" * 62
+            + "\n",
+            file=sys.stderr,
+        )
+    os._exit(1)
+
+
 class FatalConflictDispatcher(Dispatcher):
     """Как Dispatcher, но TelegramConflictError не глотается циклом retry."""
 
@@ -137,6 +170,8 @@ class FatalConflictDispatcher(Dispatcher):
                     await asyncio.sleep(wait_sec)
                     continue
                 _exit_on_conflict("listen_updates")
+            except TelegramUnauthorizedError:
+                _exit_on_unauthorized("listen_updates")
             except Exception as e:  # noqa: BLE001
                 failed = True
                 loggers.dispatcher.error("Failed to fetch updates - %s: %s", type(e).__name__, e)
@@ -167,3 +202,5 @@ class FatalConflictDispatcher(Dispatcher):
             await super().start_polling(*bots, **kwargs)
         except TelegramConflictError:
             _exit_on_conflict("start_polling")
+        except TelegramUnauthorizedError:
+            _exit_on_unauthorized("start_polling")
