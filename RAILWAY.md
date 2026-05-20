@@ -45,9 +45,13 @@ powershell -File scripts\kill_bot.ps1
 
 **`RUN_MODE`:** на Railway **не ставьте `local`** — бот уйдёт в «локальный» режим и будет конфликтовать с самим собой. Лучше: `RUN_MODE=railway` или вообще не задавать (авто по `RAILWAY_ENVIRONMENT`).
 
-**Деплой и `TelegramConflict`:** при перезапуске контейнера старый процесс кратко держит `getUpdates`. Бот на Railway **ждёт до ~3 мин** (по умолчанию 40×5 с) и не падает сразу. При необходимости: `RAILWAY_CONFLICT_RETRIES`, `RAILWAY_CONFLICT_WAIT_SEC`.
+**Деплой и `TelegramConflict`:** при перезапуске контейнера старый процесс кратко держит `getUpdates`. Бот на Railway **ждёт** (по умолчанию 40×6 с ≈ 4 мин) и не падает сразу. Переменные: `RAILWAY_CONFLICT_RETRIES`, `RAILWAY_CONFLICT_WAIT_SEC`. Опционально перед первым polling: **`RAILWAY_PRE_POLL_DELAY_SEC=12`** — пауза в секундах, чтобы старая реплика отпустила long polling.
 
-**Один worker с этим токеном:** в Railway не включайте **два сервиса**, которые оба запускают **этого** бота с одним `TELEGRAM_BOT_TOKEN`. Сайт на Vercel сюда не попадает. Если создано два worker'а под одним токеном — **Pause** лишний.
+**Если конфликт идёт минутами и в логах два разных `BOT_BUILD_ID` подряд** — это почти всегда **два живых процесса с одним токеном**, не «долгий деплой»:
+
+1. **Service → Settings:** **Replicas = 1** (не 2 и не Autoscaling на 2).
+2. В проекте Railway должен быть **один** worker с этим `TELEGRAM_BOT_TOKEN`. Старый сервис **`gastrobar`** (репо сайта) **Pause / удали**, если бот переехал на **`gastrobar-event-bot`**.
+3. Локально не запускайте `start_bot.bat` с тем же токеном.
 
 Опционально: `GEMINI_MODEL=gemini-2.5-flash`, `DATABASE_PATH=/data/gastrobar_bot.sqlite3` (если подключён Volume, см. ниже).
 

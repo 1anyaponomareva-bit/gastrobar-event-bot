@@ -159,6 +159,20 @@ def install_graceful_shutdown(
 async def run_polling(dp: Dispatcher, bot: Bot) -> None:
     """Polling с graceful shutdown hooks."""
     install_graceful_shutdown(dp, bot)
+    if is_railway_run():
+        raw = os.getenv("RAILWAY_PRE_POLL_DELAY_SEC", "").strip()
+        if raw:
+            try:
+                delay = max(0.0, float(raw))
+            except ValueError:
+                delay = 0.0
+            if delay > 0:
+                log.info(
+                    "RAILWAY_PRE_POLL_DELAY_SEC=%.0fs — пауза перед polling "
+                    "(старому контейнеру время отпустить getUpdates)",
+                    delay,
+                )
+                await asyncio.sleep(delay)
     log.info("Polling started (single instance, conflict = fail-fast)")
     try:
         await dp.start_polling(bot, handle_signals=False)

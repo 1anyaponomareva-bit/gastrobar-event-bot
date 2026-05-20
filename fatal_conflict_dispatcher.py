@@ -28,9 +28,10 @@ try:
 except ValueError:
     _RAILWAY_CONFLICT_RETRIES = 40
 try:
-    _RAILWAY_CONFLICT_WAIT_SEC = float(os.getenv("RAILWAY_CONFLICT_WAIT_SEC", "5") or "5")
+    # Чуть дольше пауза — при rolling deploy старый контейнер иногда >25s отпускает polling
+    _RAILWAY_CONFLICT_WAIT_SEC = float(os.getenv("RAILWAY_CONFLICT_WAIT_SEC", "6") or "6")
 except ValueError:
-    _RAILWAY_CONFLICT_WAIT_SEC = 5.0
+    _RAILWAY_CONFLICT_WAIT_SEC = 6.0
 
 if TYPE_CHECKING:
     from aiogram.client.bot import Bot
@@ -116,6 +117,13 @@ class FatalConflictDispatcher(Dispatcher):
                         if bucket == "railway_deploy"
                         else "другой клиент должен закрыться"
                     )
+                    if conflict_attempt == 1 and bucket == "railway_deploy":
+                        loggers.dispatcher.warning(
+                            "Railway: если конфликт не кончается за пару минут — часто "
+                            "**два процесса с одним токеном** (Replicas>1 или второй сервис "
+                            "с тем же TELEGRAM_BOT_TOKEN). Service → Settings: Replicas=1; "
+                            "Pause лишний worker. Опционально: RAILWAY_PRE_POLL_DELAY_SEC=15"
+                        )
                     loggers.dispatcher.warning(
                         "listen_updates: conflict %s/%s [%s] — ждём %.0fs (%s)",
                         conflict_attempt,
