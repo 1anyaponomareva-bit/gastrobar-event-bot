@@ -85,20 +85,36 @@ def format_dual_screen_daily_post(events: list[dict[str, Any]]) -> str:
     sub1 = str(e1.get("subtitle", e1.get("league", ""))).strip()
     sub2 = str(e2.get("subtitle", e2.get("league", ""))).strip()
 
+    blob = f"{sub1} {sub2} {title1} {title2}".lower()
+    both_epl = "premier league" in blob or (
+        "premier" in blob and "england" in f"{e1.get('league_country','')} {e2.get('league_country','')}".lower()
+    )
+    if both_epl:
+        intro = "Сегодня ночью у нас Premier League на два экрана ⚽"
+        outro = (
+            "Большой футбольный вечер в Gastrobar.\n"
+            "Пиво холодное, настойки заряжены."
+        )
+    else:
+        intro = "Сегодня ночью у нас двойной экран 😏"
+        outro = ""
+
     lines = [
-        "Сегодня ночью у нас двойной экран 😏",
+        intro,
         "",
         "На одном:",
-        f"{em1} 🕒 {sched1}",
-        title1,
+        f"🕒 {sched1} — {title1}",
     ]
-    if sub1 and sub1.lower() != title1.lower():
+    if sub1 and sub1.lower() != title1.lower() and "premier league" not in sub1.lower()[:20]:
         lines.append(sub1)
-    lines.extend(["", "На втором:", f"{em2} 🕒 {sched2}", title2])
-    if sub2 and sub2.lower() != title2.lower():
+    lines.extend(["", "На втором:", f"🕒 {sched2} — {title2}"])
+    if sub2 and sub2.lower() != title2.lower() and "premier league" not in sub2.lower()[:20]:
         lines.append(sub2)
     lines.append("")
-    if events_are_simultaneous(e1, e2):
+    if outro:
+        lines.append(outro)
+        lines.append("")
+    elif events_are_simultaneous(e1, e2):
         lines.append("У нас 2 телевизора — можно включить оба.")
         lines.append("")
     lines.append("📍Океанус, улица с траками")

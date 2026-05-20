@@ -41,21 +41,9 @@ def _parse_display_minutes(e: dict[str, Any]) -> int | None:
 
 
 def event_start_datetime_vn(e: dict[str, Any]) -> datetime | None:
-    from locked_time import get_event_start_vn
+    from next24 import resolve_event_local_datetime_vn
 
-    start = get_event_start_vn(e)
-    if start is not None:
-        return start
-    date_s = str(e.get("date", "")).strip()
-    try:
-        d = date.fromisoformat(date_s)
-    except ValueError:
-        return None
-    mins = _parse_display_minutes(e)
-    if mins is None:
-        return None
-    h, mi = divmod(mins, 60)
-    return datetime.combine(d, dtime(h, mi), tzinfo=TZ)
+    return resolve_event_local_datetime_vn(e)
 
 
 def campaign_post_date(e: dict[str, Any]) -> date | None:
@@ -81,21 +69,10 @@ def _daily_priority_score(e: dict[str, Any]) -> int:
 
 
 def is_in_daily_window(e: dict[str, Any], now: datetime | None = None) -> bool:
-    """Событие в окне ~24 ч или утреннее «завтра» при посте сегодня."""
-    now = now or _vn_now()
-    start = event_start_datetime_vn(e)
-    if not start:
-        return False
+    """Событие в окне 24 ч по Asia/Ho_Chi_Minh (aware local_datetime)."""
+    from next24 import is_in_next24_window
 
-    if now <= start <= now + timedelta(hours=24):
-        return True
-
-    # Утро следующего дня: можно анонсировать сегодня
-    if start.hour < MORNING_CUTOFF_HOUR:
-        tomorrow = now.date() + timedelta(days=1)
-        if start.date() == tomorrow and campaign_post_date(e) == now.date():
-            return True
-    return False
+    return is_in_next24_window(e, now=now, log_checks=False)
 
 
 def enrich_daily_campaign_meta(e: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
@@ -141,20 +118,54 @@ def select_now24_events(
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Сильные события в ближайшие 24 ч; без добивания слабым хвостом."""
-    from event_participants import is_gastrobar_eligible
+    from event_participants import is_gastrobar_eligible, passes_participant_rules
+    from event_verifier import gastrobar_hard_reject
+    from locked_time import has_locked_schedule
+    from next24 import is_in_next24_window, log_next24_window_header
     from watchability import enrich_watchability
 
     now = now or _vn_now()
     pool = events or []
     candidates: list[dict[str, Any]] = []
 
+    log_next24_window_header(now)
+
+    from config import NOW24_FOOTBALL_MIN_WATCHABILITY
+    from football_watchability import football_watchability_score, is_eligible_football_league_now24
+
     for e in pool:
         ev = enrich_watchability(dict(e))
-        if int(ev.get("radar_tier", 99)) >= 99 and int(ev.get("watchability_score", 0)) < 52:
+        if gastrobar_hard_reject(ev):
             continue
-        if not is_gastrobar_eligible(ev):
-            continue
-        if not is_in_daily_window(ev, now):
+        if str(ev.get("category", "")).upper() == "FOOTBALL" and ev.get("league_id") is not None:
+            item = {
+                "league_id": ev.get("league_id"),
+                "league_country": ev.get("league_country", ""),
+                "league": ev.get("league") or ev.get("subtitle", ""),
+                "title": ev.get("title", ""),
+            }
+            if not is_eligible_football_league_now24(item):
+                continue
+            fb_score, _ = football_watchability_score(item, ev)
+            if fb_score < NOW24_FOOTBALL_MIN_WATCHABILITY:
+                continue
+            ev["football_watchability_score"] = fb_score
+        if has_locked_schedule(ev):
+            ok_part, _ = passes_participant_rules(ev)
+            if not ok_part:
+                continue
+        elif str(ev.get("verified_via", "")).upper() == "API-SPORTS":
+            if gastrobar_hard_reject(ev):
+                continue
+            ok_part, _ = passes_participant_rules(ev)
+            if not ok_part:
+                continue
+        else:
+            if int(ev.get("radar_tier", 99)) >= 99 and int(ev.get("watchability_score", 0)) < 52:
+                continue
+            if not is_gastrobar_eligible(ev):
+                continue
+        if not is_in_next24_window(ev, now=now, log_checks=True):
             continue
         candidates.append(enrich_daily_campaign_meta(ev, now))
 

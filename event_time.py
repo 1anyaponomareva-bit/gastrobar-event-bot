@@ -170,9 +170,11 @@ def parse_datetime_iso(value: str) -> datetime | None:
         dt = datetime.fromisoformat(s)
     except ValueError:
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    # Уже aware — только astimezone дальше, без повторной localisation.
+    if dt.tzinfo is not None:
+        return dt
+    # Naive ISO без зоны — только явный UTC (API-SPORTS / legacy).
+    return dt.replace(tzinfo=timezone.utc)
 
 
 def source_to_utc_datetime(date_s: str, time_s: str, source_timezone: str) -> datetime:
@@ -348,7 +350,9 @@ def infer_source_timezone(event: dict[str, Any]) -> str | None:
         if re.search(r"psg|marseille|lyon|monaco", b):
             return "Europe/Paris"
         return "Europe/London"
-    if re.search(r"champions\s+league|uefa", b):
+    if re.search(r"europa\s+league|\buel\b", b):
+        return "Europe/Paris"
+    if re.search(r"champions\s+league|\bucl\b|uefa", b):
         if re.search(r"london|manchester|liverpool", b):
             return "Europe/London"
         return "Europe/Paris"

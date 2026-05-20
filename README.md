@@ -50,12 +50,25 @@ pip install -r requirements.txt
 2. Выдайте право **отправлять сообщения** (для публикации постов).
 3. Укажите `GASTROBAR_GROUP_ID` в `.env`.
 
-## Запуск
+## Запуск локально
 
 ```bash
 .venv\Scripts\activate
 python main.py
 ```
+
+Или `start_bot.bat` (Windows). В `.env` держите `RUN_MODE=local`.
+
+**Не запускайте локально, если бот уже на Railway** — один токен, один polling.
+
+## Деплой на Railway (production)
+
+Подробно: **[RAILWAY.md](RAILWAY.md)**.
+
+1. Остановите локальный бот (`scripts\kill_bot.ps1`).
+2. Push в `main` на GitHub — Railway пересоберёт worker из `railway.toml`.
+3. В Variables задайте токены и ключи (как в `.env.example`). `RUN_MODE` на Railway подставляется автоматически.
+4. Проверьте логи: `RUN_MODE=railway`, `Polling started`.
 
 Команды для админа:
 

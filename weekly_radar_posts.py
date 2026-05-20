@@ -8,6 +8,7 @@ from aiogram import Bot
 
 from config import ADMIN_ID
 from event_radar import format_radar_week_message, get_event_radar_week
+from runtime_messages import troubleshoot_footer
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ async def run_scheduled_weekly_radar(bot: Bot) -> None:
         try:
             await bot.send_message(
                 ADMIN_ID,
-                "❌ Не удалось собрать weekly Event Radar. Проверьте логи и GEMINI_API_KEY.",
+                f"❌ Не удалось собрать weekly Event Radar.\n\n{troubleshoot_footer()}",
             )
         except Exception:
             log.exception("scheduled weekly radar: failed to notify admin")

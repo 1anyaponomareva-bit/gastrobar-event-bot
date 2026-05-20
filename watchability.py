@@ -147,6 +147,14 @@ def is_major_weekly_event(e: dict[str, Any]) -> bool:
         r"grand\s+final|major|worlds|international", b, re.I
     ):
         return True
+    if re.search(
+        r"super\s+bowl|oscar|academy\s+award|grammy|emmy|golden\s+globe|"
+        r"wrestlemania|coachella|apple\s+event|playstation\s+showcase|"
+        r"xbox\s+showcase|state\s+of\s+play",
+        b,
+        re.I,
+    ):
+        return True
     return False
 
 

@@ -87,7 +87,11 @@ def lock_events_for_formatter(
     *,
     log_prefix: str = "weekly",
 ) -> list[LockedEvent]:
+    from radar_dedupe import dedupe_events, radar_dedupe_key
+
+    events = dedupe_events(events, log_prefix=f"{log_prefix}_lock")
     locked: list[LockedEvent] = []
+    seen_lock: set[tuple[str, str, str]] = set()
     for e in events:
         if str(e.get("afisha_kind", "")) == "parallel_block":
             for m in e.get("block_matches") or []:
@@ -127,6 +131,12 @@ def lock_events_for_formatter(
         title = str(e.get("title", "")).strip()
         if not title:
             continue
+
+        lk = radar_dedupe_key(e)
+        if lk in seen_lock:
+            log.info("%s skipped lock duplicate: title=%r", log_prefix, title)
+            continue
+        seen_lock.add(lk)
 
         sched_tm = str(e.get("local_time") or e.get("time", "")).strip()
         sched_wd = str(e.get("local_weekday") or e.get("weekday", "")).strip()
@@ -214,14 +224,9 @@ def format_locked_weekly_afisha(
         return "Пока нет событий в подборке."
 
     events = locked_events_to_dicts(locked)
-    display = apply_grouping_for_weekly_display(events)
+    display = apply_grouping_for_weekly_display(events, collapse_blocks=True)
 
-    lines = [
-        section_title,
-        "",
-        "Что реально стоит смотреть на экранах Gastrobar на этой неделе:",
-        "",
-    ]
+    lines = [section_title, ""]
 
     for e in display:
         if str(e.get("afisha_kind", "")) == "parallel_block":
@@ -233,19 +238,11 @@ def format_locked_weekly_afisha(
         wd = str(e.get("local_weekday") or e.get("weekday", "")).strip()
         tm = str(e.get("local_time") or e.get("display_time", "")).strip()
         title = str(e.get("title", "")).strip()
-        sub = str(e.get("subtitle", "")).strip()
-
-        et = detect_editorial_type(e)
-        if et == "nba":
-            lines.append("🔥 NBA — главный эфир")
-        elif et == "ufc":
-            lines.append("🥊 UFC Main Card")
-        elif et == "f1":
-            lines.append("🏎 Formula 1")
+        sub = str(e.get("subtitle", e.get("league", ""))).strip()
 
         lines.append(f"{em} {wd} {tm}")
         lines.append(title)
-        if sub and sub.lower() != title.lower():
+        if sub and sub.lower() not in title.lower():
             lines.append(sub)
         lines.append("")
 

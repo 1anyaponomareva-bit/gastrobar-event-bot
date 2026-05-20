@@ -38,7 +38,7 @@ def is_major_search_candidate(e: dict[str, Any]) -> bool:
         return True
     if re.search(r"\bufc\b", b, re.I) and has_matchup_in_title(title):
         return True
-  return False
+    return False
 
 
 def log_radar_rejection(

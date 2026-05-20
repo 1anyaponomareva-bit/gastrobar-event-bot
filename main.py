@@ -83,6 +83,7 @@ WEEK_FETCH_TIMEOUT_SEC = 240.0
 last_draft_state: dict[int, dict[str, Any]] = {}
 last_week_events: dict[int, list[dict[str, Any]]] = {}
 last_now24_events: dict[int, list[dict[str, Any]]] = {}
+current_message_context: dict[int, dict[str, Any]] = {}
 daily_post_state: dict[int, dict[str, Any]] = {}
 
 
@@ -125,12 +126,9 @@ def _fail_conflict(context: str) -> None:
 
 
 async def _probe_unique_get_updates_client(bot: Bot) -> None:
-    """Быстрая проверка: никто другой не держит long polling по этому токену."""
-    try:
-        await bot.get_updates(limit=1, offset=-1, timeout=1)
-        logger.info("getUpdates probe: ok (no conflict before polling)")
-    except TelegramConflictError:
-        _fail_conflict("getUpdates_probe")
+    """Проверка токена без getUpdates (не съедаем очередь сообщений)."""
+    me = await bot.get_me()
+    logger.info("Bot API ok before polling: @%s id=%s", me.username, me.id)
 
 
 async def _clear_webhook_and_log(bot: Bot) -> None:
@@ -145,8 +143,8 @@ async def _clear_webhook_and_log(bot: Bot) -> None:
         logger.exception("getWebhookInfo before delete failed")
 
     try:
-        ok = await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("delete_webhook(drop_pending_updates=True): result=%s", ok)
+        ok = await bot.delete_webhook(drop_pending_updates=False)
+        logger.info("delete_webhook(drop_pending_updates=False): result=%s", ok)
     except Exception:
         logger.exception("delete_webhook failed")
         raise
@@ -198,6 +196,8 @@ async def set_bot_commands(bot: Bot) -> None:
         BotCommand(command="check", description="Проверить API подключения"),
         BotCommand(command="gemini_test", description="Тест Gemini и Google Search"),
         BotCommand(command="daily", description="Пост дня (одно событие)"),
+        BotCommand(command="clear_cache", description="Очистить weekly cache (admin)"),
+        BotCommand(command="debug_cache", description="Статус weekly cache (admin)"),
     ]
     scopes = (
         BotCommandScopeDefault(),
@@ -233,6 +233,9 @@ async def cmd_start(message: Message) -> None:
             )
     except Exception:
         logger.exception("Не удалось обновить команды меню при /start")
+    from runtime_messages import build_tag_line
+
+    build_line = f"\n\n{build_tag_line()}" if is_local_run() else ""
     await message.answer(
         f"Бот живой. Твой ID: {user_id}\n\n"
         "Команды меню обновлены. Открой кнопку меню слева от поля ввода — там "
@@ -240,6 +243,7 @@ async def cmd_start(message: Message) -> None:
         "Event Radar: /events — меню (афиша недели или события 24 ч).\n"
         "Команду /week можно ввести вручную — она делает то же, что /events (в меню не показывается).\n\n"
         "Если списка нет: полностью закрой чат с ботом и открой снова, либо обнови Telegram."
+        f"{build_line}"
     )
 
 
@@ -253,34 +257,90 @@ def _events_menu_text() -> str:
     )
 
 
+async def _deliver_weekly_cache(
+    message: Message,
+    user_id: int,
+    cached: list[dict[str, Any]],
+    *,
+    header: str,
+) -> None:
+    last_week_events[user_id] = cached
+    current_message_context[user_id] = {"mode": "week", "events": list(cached)}
+    stats = _ru_selected_main_line(len(cached))
+    body = format_radar_week_message(cached)
+    await message.answer(
+        f"{header}\n\n{stats}\n\n{body}",
+        reply_markup=radar_week_result_kb(),
+    )
+
+
 async def _answer_radar_empty(
     message: Message,
     *,
+    user_id: int,
     raw_total: int,
     pre_count: int,
     fetch_note: str | None,
 ) -> None:
+    from runtime_messages import event_radar_error_message, resolve_radar_error_code
+    from weekly_events_cache import get_weekly_events_cache_for_display
+
+    if fetch_note in (
+        "gemini_quota",
+        "gemini_error",
+        "gemini_overloaded",
+        "search_fallback",
+        "verification_failed",
+        "weekly_cache_quota",
+    ):
+        cached = await get_weekly_events_cache_for_display()
+        if cached:
+            quota_hint = ""
+            if fetch_note == "gemini_quota":
+                quota_hint = (
+                    "\n⚠️ Лимит Gemini (≈20 запросов/день на free tier) — "
+                    "времена могут быть старыми. Завтра нажмите «Обновить неделю»."
+                )
+            if fetch_note == "weekly_cache_quota":
+                hdr = (
+                    f"📦 Афиша из кэша ({len(cached)} событий).\n"
+                    "⚠️ Gemini лимит исчерпан. Показываю последнюю сохранённую афишу."
+                )
+            elif fetch_note == "gemini_overloaded":
+                hdr = (
+                    f"📦 Афиша из кэша ({len(cached)} событий).\n"
+                    "Gemini сейчас перегружен (503) — свежий поиск не прошёл."
+                )
+            else:
+                hdr = (
+                    f"📦 Афиша из кэша ({len(cached)} событий).\n"
+                    "Свежий поиск не удался — показана сохранённая подборка."
+                ) + quota_hint
+            await _deliver_weekly_cache(message, user_id, cached, header=hdr)
+            return
+
     if fetch_note == "gemini_quota":
         await message.answer(
-            "Лимит Gemini исчерпан. Подождите до завтра или подключите биллинг.\n"
+            "Лимит Gemini исчерпан (429). Старый кэш с неверными временами скрыт.\n"
+            "Подождите до завтра или подключите биллинг:\n"
             "https://ai.google.dev/gemini-api/docs/rate-limits"
         )
-    elif fetch_note == "gemini_error":
-        await message.answer("Ошибка Gemini. Выполните /gemini_test и проверьте логи.")
-    elif raw_total > 0:
-        await message.answer(
-            "Поиск нашёл кандидатов, но ничего не прошло фильтры бара/verify. "
-            "Попробуйте «Обновить» через минуту."
-        )
-    else:
-        await message.answer(
-            "Подборка пуста. Проверьте GEMINI_API_KEY (/check) и повторите."
-        )
+        return
+
+    code = resolve_radar_error_code(
+        fetch_note=fetch_note,
+        raw_total=raw_total,
+        prelim_count=pre_count,
+        selected=0,
+    )
+    await message.answer(event_radar_error_message(code))
 
 
 async def _run_radar_mode(
     target: Message | CallbackQuery,
     mode: str,
+    *,
+    force_refresh: bool = False,
 ) -> None:
     if isinstance(target, CallbackQuery):
         message = target.message
@@ -295,8 +355,12 @@ async def _run_radar_mode(
         return
 
     chat_id = message.chat.id
-    fetch_fn = get_event_radar_week if mode == "week" else get_event_radar_now24
     label = "афиша на неделю" if mode == "week" else "события 24 часа"
+    search_hint = (
+        "📦 Загружаю сохранённую афишу…"
+        if mode == "week" and not force_refresh
+        else f"🔍 Ищу: {label}\n✍️ (1× Gemini Search + локальная проверка)"
+    )
 
     events: list[dict[str, Any]] = []
     raw_total = pre_count = selected = 0
@@ -306,20 +370,23 @@ async def _run_radar_mode(
         async with long_operation_typing(
             bot,
             chat_id,
-            initial_text=(
-                f"🔍 Ищу: {label}\n"
-                "✍️ Бот печатает… (Gemini Search + проверка)"
-            ),
+            initial_text=search_hint,
             progress_label=label,
         ) as status_msg:
             t0 = time.monotonic()
             logger.info("radar:%s fetch started user_id=%s", mode, user_id)
             try:
+                if mode == "week":
+                    coro = get_event_radar_week(force_refresh=force_refresh)
+                else:
+                    coro = get_event_radar_now24()
                 events, raw_total, pre_count, selected, fetch_note = await asyncio.wait_for(
-                    fetch_fn(),
+                    coro,
                     timeout=WEEK_FETCH_TIMEOUT_SEC,
                 )
             except asyncio.TimeoutError:
+                from runtime_messages import event_radar_error_message
+
                 logger.warning(
                     "radar:%s timeout after %.0fs user_id=%s",
                     mode,
@@ -327,19 +394,44 @@ async def _run_radar_mode(
                     user_id,
                 )
                 await status_msg.edit_text(
-                    f"⏱ Поиск занял больше {int(WEEK_FETCH_TIMEOUT_SEC // 60)} мин.\n"
-                    "Попробуйте «Обновить» через минуту или /check (Gemini API)."
+                    f"⏱ Поиск занял больше {int(WEEK_FETCH_TIMEOUT_SEC // 60)} мин.\n\n"
+                    + event_radar_error_message("timeout")
                 )
                 return
-            except Exception:
+            except Exception as exc:
+                from runtime_messages import (
+                    event_radar_error_message,
+                    resolve_radar_error_code,
+                )
+                from weekly_events_cache import get_weekly_events_cache_for_display
+
                 logger.exception(
                     "radar:%s failed after %.1fs",
                     mode,
                     time.monotonic() - t0,
                 )
+                if mode == "week":
+                    cached = await get_weekly_events_cache_for_display()
+                    if cached:
+                        try:
+                            await status_msg.delete()
+                        except Exception:
+                            pass
+                        await _deliver_weekly_cache(
+                            message,
+                            user_id,
+                            cached,
+                            header=(
+                                f"📦 Афиша из сохранённого кэша ({len(cached)} событий).\n"
+                                "Свежий поиск не удался — см. терминал.\n"
+                                "⚠️ Если времена EPL ~22:00 — кэш устарел, дождитесь сброса лимита Gemini."
+                            ),
+                        )
+                        return
+                code = resolve_radar_error_code(exception=exc)
                 await status_msg.edit_text(
-                    "❌ Не удалось собрать Event Radar.\n"
-                    "Проверьте GEMINI_API_KEY (/check) и логи Railway."
+                    event_radar_error_message(code)
+                    + f"\n\n({type(exc).__name__}: {str(exc)[:120]})"
                 )
                 return
             logger.info(
@@ -354,10 +446,19 @@ async def _run_radar_mode(
             except Exception:
                 pass
 
+        if mode == "week" and events:
+            from weekly_football_times import enrich_weekly_football_times
+
+            events = await enrich_weekly_football_times(events)
+
         if mode == "week":
             last_week_events[user_id] = events if selected else []
         else:
             last_now24_events[user_id] = events if selected else []
+        current_message_context[user_id] = {
+            "mode": mode,
+            "events": list(events) if selected else [],
+        }
 
         if selected == 0:
             if mode == "now24":
@@ -368,6 +469,7 @@ async def _run_radar_mode(
             else:
                 await _answer_radar_empty(
                     message,
+                    user_id=user_id,
                     raw_total=raw_total,
                     pre_count=pre_count,
                     fetch_note=fetch_note,
@@ -379,7 +481,8 @@ async def _run_radar_mode(
         )
 
         extra = radar_fetch_header(fetch_note)
-        stats = f"{_ru_found_events_line(raw_total)}\n{_ru_selected_main_line(selected)}"
+        found_n = pre_count if mode == "week" and pre_count else raw_total
+        stats = f"{_ru_found_events_line(found_n)}\n{_ru_selected_main_line(selected)}"
         body = (
             format_radar_week_message(events)
             if mode == "week"
@@ -389,23 +492,38 @@ async def _run_radar_mode(
         kb = radar_week_result_kb() if mode == "week" else radar_now24_result_kb()
         async with show_typing(bot, chat_id):
             await message.answer(text, reply_markup=kb)
-    except Exception:
+    except Exception as exc:
+        from runtime_messages import event_radar_error_message
+
         logger.exception("radar:%s unhandled error user_id=%s", mode, user_id)
-        await message.answer(
-            "Произошла ошибка при поиске. Попробуйте /events ещё раз."
-        )
+        await message.answer(event_radar_error_message("unexpected_error"))
 
 
 @router.message(Command("events", "week"))
 async def cmd_events_or_week(message: Message) -> None:
-    logger.info("Events menu rendered with week and now24 buttons")
-    await message.answer(_events_menu_text(), reply_markup=radar_menu_kb())
+    logger.info(
+        "cmd /events: user=%s chat=%s type=%s",
+        message.from_user.id if message.from_user else 0,
+        message.chat.id,
+        message.chat.type,
+    )
+    try:
+        await message.answer(_events_menu_text(), reply_markup=radar_menu_kb())
+    except Exception:
+        logger.exception("cmd /events answer failed")
+        raise
 
 
 @router.callback_query(F.data == "radar:week")
 async def radar_week(callback: CallbackQuery) -> None:
     await callback.answer()
-    await _run_radar_mode(callback, "week")
+    await _run_radar_mode(callback, "week", force_refresh=False)
+
+
+@router.callback_query(F.data == "radar:week:force")
+async def radar_week_force(callback: CallbackQuery) -> None:
+    await callback.answer("Принудительное обновление…")
+    await _run_radar_mode(callback, "week", force_refresh=True)
 
 
 @router.callback_query(F.data == "radar:now24")
@@ -421,71 +539,87 @@ async def radar_close(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
     last_week_events.pop(user_id, None)
     last_now24_events.pop(user_id, None)
+    current_message_context.pop(user_id, None)
     if callback.message:
         await callback.message.answer("Event Radar закрыт.")
 
 
-@router.callback_query(F.data == "radar:week:gen")
-async def radar_week_generate(callback: CallbackQuery) -> None:
+def _events_from_context(user_id: int, mode: str) -> list[dict[str, Any]]:
+    ctx = current_message_context.get(user_id) or {}
+    if ctx.get("mode") == mode and ctx.get("events"):
+        return list(ctx["events"])
+    if mode == "now24":
+        return list(last_now24_events.get(user_id) or [])
+    return list(last_week_events.get(user_id) or [])
+
+
+@router.callback_query(F.data.in_({"radar:post_week", "radar:week:gen"}))
+async def radar_post_week(callback: CallbackQuery) -> None:
     await callback.answer()
-    events = last_week_events.get(callback.from_user.id) or []
+    user_id = callback.from_user.id
+    logger.info("POST GENERATION: mode=week no-search")
+    events = _events_from_context(user_id, "week")
+    logger.info("POST_WEEK_FROM_STATE: %s", [e.get("title") for e in events])
     if not events:
         await callback.message.answer(
-            "Сессия устарела. Нажмите /events → Афиша на неделю."
+            "Нет сохранённой недельной афиши. Сначала нажмите 📅 Афиша на неделю."
         )
         return
     async with show_typing(callback.bot, callback.message.chat.id):
         await callback.message.answer("Пишу пост по афише недели…")
         post_text = await generate_weekly_poster(events)
     draft_id = await insert_draft("week_post", post_text, "draft")
-    last_draft_state[callback.from_user.id] = {"draft_id": draft_id, "events": events}
+    last_draft_state[user_id] = {"draft_id": draft_id, "events": events}
     await callback.message.answer(post_text, reply_markup=post_result_kb(draft_id))
 
 
 @router.callback_query(F.data == "radar:post_now24")
 async def radar_post_now24(callback: CallbackQuery) -> None:
     await callback.answer()
-    logger.info("radar:post_now24 clicked")
+    user_id = callback.from_user.id
     chat_id = callback.message.chat.id
+    logger.info("POST GENERATION: mode=now24 no-search")
+    events = _events_from_context(user_id, "now24")
+    logger.info("POST_NOW24_FROM_STATE: %s", [e.get("title") for e in events])
+    if not events:
+        await callback.message.answer(
+            "Нет сохранённых событий 24 часа. "
+            "Сначала нажмите ⚡ События ближайших 24 часов."
+        )
+        return
     try:
+        from daily_event_posts import build_post_from_saved_events
+
         async with long_operation_typing(
             callback.bot,
             chat_id,
-            initial_text="📋 Готовлю пост на сегодня…\n✍️ Бот печатает…",
-            progress_label="пост на сегодня",
+            initial_text="📋 Оформляю пост по показанным событиям…\n✍️ Бот печатает…",
+            progress_label="пост now24",
         ):
             result = await asyncio.wait_for(
-                build_daily_content_package(log_prefix="radar_post_now24"),
+                build_post_from_saved_events(
+                    events,
+                    mode="now24",
+                    log_prefix="radar_post_now24",
+                ),
                 timeout=WEEK_FETCH_TIMEOUT_SEC,
             )
-        if result.error_code == "cache_empty":
-            await callback.message.answer(CACHE_EMPTY_MSG)
-            async with long_operation_typing(
-                callback.bot,
-                chat_id,
-                initial_text="🔍 Быстрый поиск ближайших 24 часов…",
-                progress_label="поиск 24ч",
-            ):
-                result = await asyncio.wait_for(
-                    build_daily_content_package(
-                        log_prefix="radar_post_now24",
-                        force_fresh_fallback=True,
-                    ),
-                    timeout=WEEK_FETCH_TIMEOUT_SEC,
-                )
     except asyncio.TimeoutError:
         await callback.message.answer("Таймаут. Повторите позже.")
         return
     if not result.ok or not result.package:
-        await callback.message.answer(user_error_message(result))
+        await callback.message.answer(
+            result.error_detail or "Не удалось оформить пост."
+        )
         return
     pkg = result.package
-    daily_post_state[callback.from_user.id] = {
+    daily_post_state[user_id] = {
         "draft_id": pkg.draft_id,
         "event": pkg.events[0] if pkg.events else {},
         "events": pkg.events,
         "image_path": pkg.image_path,
         "poster_source": pkg.image_source,
+        "mode": "now24",
     }
     await deliver_daily_content(callback.bot, pkg, chat_id=chat_id)
 
@@ -592,7 +726,12 @@ async def daily_redo(callback: CallbackQuery) -> None:
                 except json.JSONDecodeError:
                     events = []
         if not events:
-            events = last_now24_events.get(user_id) or []
+            events = _events_from_context(
+                user_id, str(state.get("mode", "now24"))
+            )
+        mode = str(state.get("mode", "now24"))
+        from daily_event_posts import build_post_from_saved_events
+
         async with long_operation_typing(
             callback.bot,
             callback.message.chat.id,
@@ -600,7 +739,11 @@ async def daily_redo(callback: CallbackQuery) -> None:
             progress_label="пост дня",
         ):
             result = await asyncio.wait_for(
-                build_daily_content_package(events, log_prefix="daily_redo"),
+                build_post_from_saved_events(
+                    events,
+                    mode=mode if mode in ("now24", "week") else "now24",
+                    log_prefix="daily_redo",
+                ),
                 timeout=WEEK_FETCH_TIMEOUT_SEC,
             )
         if not result.ok or not result.package:
@@ -643,7 +786,49 @@ async def cmd_gemini_test(message: Message) -> None:
         await message.answer(report.format_telegram())
     except Exception:
         logger.exception("gemini_test failed")
-        await message.answer("Ошибка при /gemini_test. Смотрите Railway logs.")
+        from runtime_messages import gemini_test_error_message
+
+        await message.answer(gemini_test_error_message())
+
+
+@router.message(Command("clear_cache"))
+async def cmd_clear_cache(message: Message) -> None:
+    if not message.from_user or message.from_user.id != ADMIN_ID:
+        await message.answer("Команда только для администратора.")
+        return
+    from weekly_events_cache import clear_weekly_events_cache
+
+    await clear_weekly_events_cache()
+    await message.answer("✅ Weekly cache очищен. Следующая афиша соберётся заново.")
+
+
+@router.message(Command("debug_cache"))
+async def cmd_debug_cache(message: Message) -> None:
+    if not message.from_user or message.from_user.id != ADMIN_ID:
+        await message.answer("Команда только для администратора.")
+        return
+    from gemini_usage import get_gemini_calls_today_sync
+    from weekly_events_cache import (
+        load_weekly_events_cache,
+        weekly_cache_updated_today_vn,
+    )
+
+    events = await load_weekly_events_cache()
+    today = await weekly_cache_updated_today_vn()
+    lines = [
+        "🧪 Weekly cache debug",
+        f"Событий в кэше: {len(events)}",
+        f"Обновлён сегодня (VN): {'да' if today else 'нет'}",
+        f"Gemini calls сегодня: {get_gemini_calls_today_sync()}",
+    ]
+    for i, e in enumerate(events[:8], 1):
+        lines.append(
+            f"{i}. {e.get('local_weekday', e.get('weekday', ''))} "
+            f"{e.get('local_time', e.get('time', ''))} — {e.get('title', '')[:60]}"
+        )
+    if len(events) > 8:
+        lines.append(f"… ещё {len(events) - 8}")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("check"))
@@ -665,9 +850,18 @@ async def cmd_check(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
+@router.message(F.text.func(lambda t: bool(t) and t.strip().lower().startswith("/events")))
+async def cmd_events_text_fallback(message: Message) -> None:
+    """На случай, если Command-фильтр не сработал (группа / клиент Telegram)."""
+    logger.info("cmd /events fallback via text=%r", message.text)
+    await message.answer(_events_menu_text(), reply_markup=radar_menu_kb())
+
+
 @router.message(F.text)
 async def cmd_help_hint(message: Message) -> None:
     """Подсказка: без команд бот молчит — пользователь мог отправить обычный текст или неизвестную команду."""
+    if message.text and message.text.strip().startswith("/"):
+        logger.info("unhandled command text=%r chat=%s", message.text, message.chat.id)
     await message.answer(
         "Я отвечаю только на команды:\n"
         "/start — проверка, что бот на связи\n"
@@ -766,7 +960,10 @@ async def main() -> None:
         await set_bot_commands(bot)
         await _probe_unique_get_updates_client(bot)
 
+        from bot_update_log import LogUpdatesMiddleware
+
         dp = FatalConflictDispatcher()
+        dp.update.outer_middleware(LogUpdatesMiddleware())
         dp.include_router(router)
         logger.info(
             "Handlers ready: /events /daily /check (router included)"

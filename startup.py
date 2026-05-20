@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
@@ -37,11 +38,16 @@ _LOCK_PATH = _PROJECT_ROOT / "bot.lock"
 
 
 def log_startup_banner() -> None:
+    from runtime_messages import BOT_BUILD_ID
+
+    log.info("BOT_BUILD_ID=%s", BOT_BUILD_ID)
     if is_local_run():
         log.info("=" * 60)
         log.info("LOCAL MODE ACTIVE")
         log.info("=" * 60)
     log.info("RUN_MODE=%s", RUN_MODE)
+    if is_railway_run() and os.getenv("RUN_MODE", "").strip().lower() != "railway":
+        log.info("RUN_MODE auto-detected from Railway environment")
     log.info("Project root: %s", _PROJECT_ROOT)
     log.info("Database: %s", DATABASE_PATH)
     log.info("Timezone: %s", TIMEZONE)

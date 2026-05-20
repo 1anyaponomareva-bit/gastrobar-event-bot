@@ -573,7 +573,7 @@ def _pretty_match_title(title: str) -> str:
 def _match_item_from_football(e: dict[str, Any], tier: str) -> dict[str, Any]:
     league_raw = _clean_league_name(str(e.get("league", "")))
     title = _pretty_match_title(str(e.get("title", "")))
-    return {
+    item: dict[str, Any] = {
         "kind": "match",
         "sport": "football",
         "title": title,
@@ -583,6 +583,10 @@ def _match_item_from_football(e: dict[str, Any], tier: str) -> dict[str, Any]:
         "time": str(e.get("time", "")),
         "tier": tier,
     }
+    iso = str(e.get("fixture_utc_iso") or "").strip()
+    if iso:
+        item["fixture_utc_iso"] = iso
+    return item
 
 
 def _editor_block_defs() -> dict[str, dict[str, Any]]:
@@ -819,6 +823,80 @@ async def _get_json(url: str, *, headers: dict[str, str], timeout: float = 15.0)
     return data
 
 
+async def get_football_events_next_days_vn(*, days_ahead: int = 2) -> list[dict[str, Any]]:
+    """Футбол на сегодня + следующие дни (календарь VN) — для now24."""
+    if not SPORTS_API_KEY:
+        return []
+
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Asia/Ho_Chi_Minh")
+    start = datetime.now(tz).date()
+    dates = [start + timedelta(days=i) for i in range(max(1, days_ahead))]
+
+    headers = {"x-apisports-key": SPORTS_API_KEY}
+    base = "https://v3.football.api-sports.io"
+
+    async def one_day(d: date) -> list[dict[str, Any]]:
+        url = f"{base}/fixtures?date={d.isoformat()}"
+        log.info("Football endpoint (now24): %s", url)
+        try:
+            data = await _get_json(url, headers=headers)
+        except Exception as e:
+            log.error("Football day failed (%s): %s", d.isoformat(), e)
+            return []
+
+        resp = data.get("response") or []
+        if not isinstance(resp, list):
+            return []
+        log.info("Football fixtures on %s: %s", d.isoformat(), len(resp))
+
+        day_events: list[dict[str, Any]] = []
+        for item in resp:
+            fixture = item.get("fixture") or {}
+            league = item.get("league") or {}
+            teams = item.get("teams") or {}
+            home = (teams.get("home") or {}).get("name") or ""
+            away = (teams.get("away") or {}).get("name") or ""
+            league_name = league.get("name") or ""
+            league_country = str(league.get("country") or "").strip()
+            league_id = league.get("id")
+            round_name = league.get("round") or ""
+            league_full = league_name + (f" ({round_name})" if round_name else "")
+            title = f"{home} vs {away}".strip(" vs").strip()
+            dt_iso = fixture.get("date") or ""
+            d_str, t_str = _parse_dt_to_local(dt_iso)
+            if not d_str:
+                continue
+            day_events.append(
+                {
+                    "sport": "football",
+                    "title": title or "Match",
+                    "league": league_full or league_name or "Football",
+                    "league_id": league_id,
+                    "league_country": league_country,
+                    "date": d_str,
+                    "time": t_str,
+                    "fixture_utc_iso": str(dt_iso),
+                    "importance": "low",
+                    "source": "API-SPORTS",
+                }
+            )
+        return day_events
+
+    chunks = await asyncio.gather(
+        *[one_day(d) for d in dates],
+        return_exceptions=True,
+    )
+    events: list[dict[str, Any]] = []
+    for ch in chunks:
+        if isinstance(ch, Exception):
+            log.error("Football now24 day failed: %s", ch)
+            continue
+        events.extend(ch)
+    return events
+
+
 async def get_football_events() -> list[dict[str, Any]]:
     """
     Football API-SPORTS: события на ближайшие 7 дней.
@@ -852,6 +930,8 @@ async def get_football_events() -> list[dict[str, Any]]:
             home = (teams.get("home") or {}).get("name") or ""
             away = (teams.get("away") or {}).get("name") or ""
             league_name = league.get("name") or ""
+            league_country = str(league.get("country") or "").strip()
+            league_id = league.get("id")
             round_name = league.get("round") or ""
             league_full = league_name + (f" ({round_name})" if round_name else "")
             title = f"{home} vs {away}".strip(" vs").strip()
@@ -864,8 +944,11 @@ async def get_football_events() -> list[dict[str, Any]]:
                     "sport": "football",
                     "title": title or "Match",
                     "league": league_full or league_name or "Football",
+                    "league_id": league_id,
+                    "league_country": league_country,
                     "date": d_str,
                     "time": t_str,
+                    "fixture_utc_iso": str(dt_iso),
                     "importance": "low",
                     "source": "API-SPORTS",
                 }

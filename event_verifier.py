@@ -69,11 +69,20 @@ def bar_event_blob(e: dict[str, Any]) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def is_digest_football_row(e: dict[str, Any]) -> bool:
+    sub = f"{e.get('subtitle', '')} {e.get('league', '')}".lower()
+    return "final day" in sub
+
+
 def gastrobar_hard_reject(e: dict[str, Any]) -> bool:
     """
     События, которые не должны попадать в Gastrobar: One Chicago, procedural finales,
     обычные сериальные финалы без уровня Eurovision/Oscars и т.д.
     """
+    if is_digest_football_row(e):
+        logger.info("gastrobar_hard_reject: digest_final_day %s", e.get("title"))
+        return True
+
     b = bar_event_blob(e)
 
     if re.search(
@@ -136,15 +145,21 @@ Candidate event (from another model pass):
 
 Do not verify US network procedural season/series finales (Chicago Med/Fire/P.D., NCIS, Law & Order, Grey's Anatomy, etc.) as suitable — return verified:false unless it is truly Eurovision/Oscars-level.
 
-You must confirm using reliable web sources:
-* exact event title
-* exact participants (as in official listings)
+You must confirm using reliable web sources (compare at least two when possible):
+* official league / tournament website
+* Google Sports or Google scoreboard for this exact fixture
+* BetBoom or major sportsbook kickoff line (for football/basketball/hockey)
+
+Confirm:
+* exact event title and both participants
 * official date (YYYY-MM-DD)
-* official start time (HH:MM) in source timezone — NOT converted to Vietnam
-* source_timezone as IANA only (e.g. Europe/Zurich for Eurovision, America/New_York for UFC US)
+* official start time (HH:MM) in source_timezone — NOT converted to Vietnam
+* source_timezone as IANA only (e.g. Europe/London for Premier League, Europe/Paris for UEL/UCL)
 * do NOT return Asia/Ho_Chi_Minh as source_timezone unless the listing is truly Vietnam-local
 * whether the time is exact or estimated (for UFC main event when only approximate, use estimated)
-* reliable source name (short)
+* reference_source: short name of site used (e.g. "Premier League", "BetBoom", "Google Sports")
+
+If candidate date/time in the JSON differs from official listings by more than 15 minutes, return the OFFICIAL values (not the candidate).
 
 If you cannot verify exact date AND time AND source timezone, return:
 {"verified": false, "reason": "..."}
@@ -161,7 +176,8 @@ If verified true, return shape:
   "time": "21:30",
   "source_timezone": "America/New_York",
   "time_precision": "exact",
-  "source_name": "NHL official site"
+  "source_name": "NHL official site",
+  "reference_source": "NHL.com / Google Sports"
 }
 
 Use "time_precision": "estimated" when the listing is approximate (e.g. UFC main event TBC, about 9pm).
@@ -557,7 +573,7 @@ async def _match_apisports(event: dict[str, Any], branch: str) -> dict[str, Any]
 
     best: tuple[float, dict[str, Any]] | None = None
     for delta in (0, -1, 1):
-        d = base + timedelta(days=d)
+        d = base + timedelta(days=delta)
         rows = await fn(d)
         for row in rows:
             sc = _similarity(title_cand, row.get("title", ""))
@@ -869,10 +885,9 @@ def _strict_second_verify_enabled() -> bool:
 
 async def verify_event(event: dict[str, Any]) -> dict[str, Any] | None:
     """
-  Проверка одного события:
-  - sports: API-SPORTS → confidence high; иначе medium из Gemini Search
-  - entertainment/esports: medium из Gemini Search (без второго verify по умолчанию)
-  - RADAR_STRICT_VERIFY=1 — дополнительно старый жёсткий Gemini verify
+  Локальная проверка (без per-event Gemini):
+  - sports: API-SPORTS → high; иначе timezone_truth + lock из полей discovery
+  - RADAR_STRICT_VERIFY=1 — опционально старый Gemini verify (не для free tier)
     """
     from locked_time import has_locked_schedule, lock_event_schedule
 
@@ -962,14 +977,30 @@ async def verify_event(event: dict[str, Any]) -> dict[str, Any] | None:
             from radar_recall import log_medium_accepted
 
             log_medium_accepted(out, via=str(out.get("verified_via", "verify")))
-        logger.info(
-            "VERIFY RESULT: confidence=%s via=%s title=%r reason=%s",
-            out.get("confidence"),
-            out.get("verified_via"),
-            out.get("title"),
-            out.get("verification_reason"),
+
+        from radar_current_week import allows_gemini_discovery_only, validate_radar_event
+
+        allow_gemini = allows_gemini_discovery_only(out)
+        validated = validate_radar_event(
+            out,
+            phase="verify",
+            allow_gemini_discovery=allow_gemini,
         )
-        return out
+        if validated is None:
+            _log_verify_removed(title, "current_week_or_source_gate", event)
+            return None
+
+        logger.info(
+            "VERIFY RESULT: confidence=%s via=%s title=%r reason=%s "
+            "current_week=%s source_verified=%s",
+            validated.get("confidence"),
+            validated.get("verified_via"),
+            validated.get("title"),
+            validated.get("verification_reason"),
+            validated.get("current_week_validated"),
+            validated.get("source_verified"),
+        )
+        return validated
 
 
 def sort_key_verified(item: dict[str, Any]) -> tuple[str, str]:

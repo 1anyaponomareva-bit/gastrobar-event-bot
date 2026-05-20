@@ -66,6 +66,15 @@ async def init_db() -> None:
         )
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS gemini_daily_usage (
+                day_vn TEXT PRIMARY KEY,
+                call_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS scheduled_event_posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 campaign_date TEXT NOT NULL,
@@ -229,6 +238,23 @@ async def get_radar_snapshot(mode: str) -> list[dict[str, Any]] | None:
         return data if isinstance(data, list) else None
     except json.JSONDecodeError:
         return None
+
+
+async def get_radar_snapshot_meta(mode: str) -> dict[str, Any]:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT meta_json FROM radar_snapshots WHERE mode = ?",
+            (mode,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return {}
+    try:
+        data = json.loads(row["meta_json"] or "{}")
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
 
 
 async def record_scheduled_post(

@@ -1,0 +1,10 @@
+# Gastrobar Telegram bot — worker (long polling, без HTTP-порта).
+# Подключите репозиторий в Railway → Deploy; переменные — см. RAILWAY.md
+
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python -u main.py"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10

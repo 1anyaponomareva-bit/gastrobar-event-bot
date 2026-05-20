@@ -216,18 +216,68 @@ async def _generate_post_text(post_events: list[dict[str, Any]]) -> str:
     return editorial
 
 
+async def build_post_from_saved_events(
+    events: list[dict[str, Any]],
+    *,
+    mode: str,
+    log_prefix: str = "radar_post",
+) -> DailyBuildResult:
+    """
+    Пост только из уже показанных событий (now24 / week). Без Event Radar и без поиска.
+    """
+    import copy
+
+    log.info("POST GENERATION: mode=%s no-search", mode)
+    log.info(
+        "POST_%s_FROM_STATE: %s",
+        mode.upper(),
+        [str(e.get("title", "")) for e in events],
+    )
+    if not events:
+        if mode == "now24":
+            return DailyBuildResult(
+                ok=False,
+                error_code="empty_now24",
+                error_detail=(
+                    "Нет сохранённых событий 24 часа. "
+                    "Сначала нажмите ⚡ События ближайших 24 часов."
+                ),
+            )
+        return DailyBuildResult(
+            ok=False,
+            error_code="empty_week",
+            error_detail=(
+                "Нет сохранённой недельной афиши. "
+                "Сначала нажмите 📅 Афиша на неделю."
+            ),
+        )
+    from daily_event import enrich_daily_campaign_meta
+
+    frozen = [
+        enrich_daily_campaign_meta(normalize_event_for_daily(copy.deepcopy(e)))
+        for e in events
+    ]
+    return await build_daily_content_package(
+        frozen,
+        log_prefix=log_prefix,
+        force_fresh_fallback=False,
+        allow_fresh_fallback=False,
+    )
+
+
 async def build_daily_content_package(
     events: list[dict[str, Any]] | None = None,
     *,
     log_prefix: str = "daily",
     force_fresh_fallback: bool = False,
+    allow_fresh_fallback: bool = True,
 ) -> DailyBuildResult:
     log.info("%s started", log_prefix)
 
     try:
         now24, source_tag = await resolve_daily_events(
             events,
-            force_fresh_fallback=force_fresh_fallback,
+            force_fresh_fallback=force_fresh_fallback and allow_fresh_fallback,
         )
 
         if source_tag == "cache_empty":

@@ -92,20 +92,9 @@ def is_acceptable_source_timezone(tz: str, event: dict[str, Any]) -> bool:
 
 
 def log_event_time_debug(event: dict[str, Any], *, phase: str = "") -> None:
-    prefix = f"[{phase}] " if phase else ""
-    log.info("%sEVENT RAW UTC: %s", prefix, event.get("utc_datetime"))
-    log.info(
-        "%sEVENT LOCAL: %s %s",
-        prefix,
-        event.get("local_weekday") or event.get("weekday"),
-        event.get("local_time") or event.get("time"),
-    )
-    log.info("%sTIMEZONE APPLIED: %s", prefix, TARGET_TZ_NAME)
-    log.info(
-        "%sSOURCE TIMEZONE: %s",
-        prefix,
-        event.get("source_timezone") or event.get("original_timezone"),
-    )
+    from timezone_truth import log_event_debug as _debug
+
+    _debug(event, phase=phase)
 
 
 def run_sanity_checks(event: dict[str, Any]) -> None:
@@ -173,76 +162,35 @@ def has_locked_schedule(event: dict[str, Any]) -> bool:
 
 
 def lock_event_schedule(event: dict[str, Any], *, phase: str = "lock") -> dict[str, Any] | None:
-    """
-    Establish immutable schedule from utc_datetime OR verified source fields only.
-  No timezone inference. No reparsing display_time.
-    """
-    out = dict(event)
-    title = out.get("title")
+    """Immutable schedule via timezone_truth (single UTC → VN conversion)."""
+    from timezone_truth import establish_schedule
 
-    utc_raw = str(out.get("utc_datetime", "")).strip()
-    if utc_raw:
-        utc_dt = parse_datetime_iso(utc_raw)
-        if utc_dt is None:
-            log.error("lock_event_schedule: invalid utc_datetime title=%r", title)
-            return None
-    else:
-        date_s, time_s, src_tz = extract_source_fields_for_conversion(out)
-        if not src_tz or not is_acceptable_source_timezone(src_tz, out):
-            from event_time import extract_source_fields, infer_source_timezone
-
-            fd, ft, fz = extract_source_fields(out)
-            if fz and is_acceptable_source_timezone(fz, out):
-                date_s, time_s, src_tz = fd, ft, fz
-            else:
-                inferred = infer_source_timezone(out)
-                if inferred and is_acceptable_source_timezone(inferred, out):
-                    log.info(
-                        "TRUSTED SOURCE TZ INFERENCE: %s for %r",
-                        inferred,
-                        title,
-                    )
-                    src_tz = inferred
-                    if not date_s:
-                        date_s = fd
-                    if not time_s:
-                        time_s = ft
-        if not src_tz or not is_acceptable_source_timezone(src_tz, out):
-            log.warning(
-                "lock_event_schedule: missing/invalid SOURCE TIMEZONE title=%r tz=%r",
-                title,
-                src_tz,
-            )
-            return None
-        if not _DATE_RE.match(date_s):
-            return None
-        time_norm, is_approx = _parse_time_flexible(time_s)
-        if not time_norm:
-            return None
-        try:
-            utc_dt = source_to_utc_datetime(date_s, time_norm, src_tz)
-        except Exception as e:
-            log.error("lock_event_schedule convert failed: %s", e, exc_info=True)
-            return None
-        out.setdefault("original_date", date_s)
-        out.setdefault("original_time", time_norm)
-        out.setdefault("original_timezone", src_tz)
-        out.setdefault("source_timezone", src_tz)
-        if is_approx:
-            out["time_precision"] = "estimated"
-
-    fields = utc_datetime_to_local_fields(utc_dt)
-    out.update(fields)
-    prec = str(out.get("time_precision", "exact")).lower()
-    tm = out["local_time"]
-    out["time_display"] = f"≈{tm}" if prec == "estimated" else tm
-    out["display_time"] = tm
-    out["time_locked"] = True
-    out["schedule_locked"] = True
-
-    log_event_time_debug(out, phase=phase)
+    out = establish_schedule(event, phase=phase)
+    if out is None:
+        return None
     log_datetime_pipeline(out)
     run_sanity_checks(out)
+    return out
+
+
+def reapply_local_from_utc(event: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Единственный переход UTC → VN по полю utc_datetime (без establish_schedule).
+    Используется при загрузке weekly cache и для API-SPORTS.
+    """
+    utc_raw = str(event.get("utc_datetime", "")).strip()
+    if not utc_raw:
+        return None
+    utc_dt = parse_datetime_iso(utc_raw)
+    if utc_dt is None:
+        return None
+    out = dict(event)
+    out.update(utc_datetime_to_local_fields(utc_dt))
+    out["time_locked"] = True
+    out["schedule_locked"] = True
+    tm = str(out.get("local_time", ""))
+    out["time_display"] = tm
+    out["display_time"] = tm
     return out
 
 
@@ -252,20 +200,35 @@ def lock_event_from_api_utc_iso(
     *,
     phase: str = "api_sports",
 ) -> dict[str, Any] | None:
-    """API-SPORTS fixture.date is authoritative UTC ISO."""
+    """
+    API-SPORTS fixture.date — authoritative UTC (Z). Один переход UTC → VN.
+    Не вызывать establish_schedule: иначе Europe/London перетолкует 18:30Z как BST wall.
+    """
     dt = parse_datetime_iso(dt_iso)
     if dt is None:
         return None
-    out = dict(event)
     utc_aware = dt.astimezone(timezone.utc)
-    out["utc_datetime"] = utc_aware.isoformat()
+    out = dict(event)
+    out.update(utc_datetime_to_local_fields(utc_aware))
     out["original_timezone"] = "UTC"
     out["original_date"] = utc_aware.date().isoformat()
     out["original_time"] = utc_aware.strftime("%H:%M")
     out["source_timezone"] = "UTC"
+    out["utc_authority"] = "api_sports"
     out["time_precision"] = "exact"
     out["verified_via"] = out.get("verified_via") or "API-SPORTS"
-    return lock_event_schedule(out, phase=phase)
+    tm = str(out.get("local_time", ""))
+    out["time_display"] = tm
+    out["display_time"] = tm
+    out["time_locked"] = True
+    out["schedule_locked"] = True
+
+    from timezone_truth import log_event_debug
+
+    log_event_debug(out, phase=phase)
+    log_datetime_pipeline(out)
+    run_sanity_checks(out)
+    return out
 
 
 def schedule_dict_for_formatters(event: dict[str, Any]) -> dict[str, str]:
@@ -326,9 +289,6 @@ def assert_no_time_drift(
 
 
 def get_event_start_vn(event: dict[str, Any]) -> datetime | None:
-    loc = parse_datetime_iso(str(event.get("local_datetime", "")))
-    if loc is not None:
-        return loc.astimezone(TARGET_TZ)
-    from event_time import get_event_start_vn as _legacy
+    from next24 import resolve_event_local_datetime_vn
 
-    return _legacy(event)
+    return resolve_event_local_datetime_vn(event)

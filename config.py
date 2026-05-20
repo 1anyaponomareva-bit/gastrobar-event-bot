@@ -22,12 +22,19 @@ GEMINI_MODEL: str = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
 
 DATABASE_PATH: str = os.getenv("DATABASE_PATH", "gastrobar_bot.sqlite3").strip()
 
-# По умолчанию local (разработка на Windows). Railway только при RUN_MODE=railway.
-_RUN_MODE_RAW = os.getenv("RUN_MODE", "local").strip().lower()
-if _RUN_MODE_RAW == "railway":
-    RUN_MODE: str = "railway"
-else:
-    RUN_MODE = "local"
+def _resolve_run_mode() -> str:
+    """local на ПК; railway — явно или автоматически на Railway."""
+    raw = os.getenv("RUN_MODE", "").strip().lower()
+    if raw == "railway":
+        return "railway"
+    if raw == "local":
+        return "local"
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+        return "railway"
+    return "local"
+
+
+RUN_MODE: str = _resolve_run_mode()
 
 # Fail-fast, если на Railway подставили чужой токен (например SpiceSpace)
 EXPECTED_BOT_USERNAME: str = (
@@ -55,14 +62,19 @@ WEEKLY_RADAR_HOUR: int = int(os.getenv("WEEKLY_RADAR_HOUR", "10") or "10")
 WEEKLY_RADAR_MINUTE: int = int(os.getenv("WEEKLY_RADAR_MINUTE", "40") or "40")
 
 # Weekly Event Radar: до N событий при высоком watchability
-RADAR_WEEKLY_MAX: int = max(6, int(os.getenv("RADAR_WEEKLY_MAX", "15") or "15"))
+RADAR_WEEKLY_MAX: int = max(8, int(os.getenv("RADAR_WEEKLY_MAX", "18") or "18"))
 RADAR_MIN_WATCHABILITY: int = max(
-    0, int(os.getenv("RADAR_MIN_WATCHABILITY", "38") or "38")
+    0, int(os.getenv("RADAR_MIN_WATCHABILITY", "34") or "34")
 )
 # Минимум событий в weekly после отбора (backfill major events)
 RADAR_WEEKLY_TARGET_MIN: int = max(
-    6, int(os.getenv("RADAR_WEEKLY_TARGET_MIN", "8") or "8")
+    8, int(os.getenv("RADAR_WEEKLY_TARGET_MIN", "10") or "10")
 )
 
 # Сколько телевизоров в баре — лимит параллельных эфиров в daily / now24
 GASTROBAR_TV_COUNT: int = max(1, int(os.getenv("GASTROBAR_TV_COUNT", "2") or "2"))
+
+# Football now24: минимальный football_watchability_score (API-SPORTS)
+NOW24_FOOTBALL_MIN_WATCHABILITY: int = max(
+    40, int(os.getenv("NOW24_FOOTBALL_MIN_WATCHABILITY", "55") or "55")
+)

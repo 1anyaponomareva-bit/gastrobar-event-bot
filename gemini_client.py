@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import traceback
 from dataclasses import dataclass
 from typing import Any
@@ -120,10 +121,38 @@ def log_gemini_error(context: str, exc: BaseException) -> str:
     return summary
 
 
+def is_gemini_transient_error(exc: BaseException) -> bool:
+    """503/5xx — перегрузка модели; ключ тут ни при чём."""
+    t = str(exc).lower()
+    return (
+        "503" in str(exc)
+        or "502" in str(exc)
+        or "504" in str(exc)
+        or "500" in str(exc)
+        or "unavailable" in t
+        or "high demand" in t
+        or "servererror" in t
+    )
+
+
+def is_gemini_quota_error(exc: BaseException) -> bool:
+    """429 / free tier daily limit — не отбрасывать события, пропустить лишние вызовы."""
+    t = str(exc)
+    tl = t.lower()
+    return (
+        "429" in t
+        or "RESOURCE_EXHAUSTED" in t
+        or "Too Many Requests" in t
+        or "generate_content_free_tier" in tl
+        or ("quota" in tl and "exceed" in tl)
+    )
+
+
 def _generate_sync(
     *,
     contents: str,
     use_search: bool,
+    max_retries: int = 5,
 ) -> str:
     client = genai.Client(api_key=GEMINI_API_KEY)
     model = effective_gemini_model()
@@ -132,15 +161,34 @@ def _generate_sync(
         config = types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())],
         )
-    response = client.models.generate_content(
-        model=model,
-        contents=contents,
-        config=config,
-    )
-    text = (response.text or "").strip()
-    if not text:
-        raise RuntimeError("Пустой ответ Gemini")
-    return text
+    last_err: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+            text = (response.text or "").strip()
+            if not text:
+                raise RuntimeError("Пустой ответ Gemini")
+            return text
+        except Exception as e:
+            last_err = e
+            if attempt >= max_retries or not is_gemini_transient_error(e):
+                raise
+            delay = min(45.0, 5.0 * (2 ** (attempt - 1)))
+            log.warning(
+                "Gemini transient error (%s), retry %s/%s in %.0fs",
+                type(e).__name__,
+                attempt,
+                max_retries,
+                delay,
+            )
+            time.sleep(delay)
+    if last_err:
+        raise last_err
+    raise RuntimeError("Gemini generate exhausted retries")
 
 
 def _run_call(label: str, *, use_search: bool) -> GeminiCallResult:
@@ -200,6 +248,14 @@ def generate_radar_content_sync(
     prompt: str,
     *,
     use_search: bool,
+    purpose: str = "radar",
 ) -> str:
-    """Один вызов generateContent для Event Radar."""
-    return _generate_sync(contents=prompt, use_search=use_search)
+    """Один вызов generateContent для Event Radar (с RPM/RPD guard)."""
+    from gemini_usage import can_make_gemini_call_sync, record_gemini_call_sync
+
+    ok, reason = can_make_gemini_call_sync(purpose=purpose)
+    if not ok:
+        raise RuntimeError(f"Gemini rate limit guard: {reason}")
+    text = _generate_sync(contents=prompt, use_search=use_search)
+    record_gemini_call_sync(purpose)
+    return text

@@ -28,13 +28,13 @@ def radar_week_result_kb() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="📋 Сгенерировать пост",
-                    callback_data="radar:week:gen",
+                    callback_data="radar:post_week",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="🔄 Обновить неделю",
-                    callback_data="radar:week",
+                    text="🔄 Обновить принудительно",
+                    callback_data="radar:week:force",
                 ),
             ],
             [

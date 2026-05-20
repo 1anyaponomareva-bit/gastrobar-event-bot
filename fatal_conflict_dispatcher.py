@@ -15,9 +15,45 @@ from aiogram.exceptions import TelegramConflictError
 from aiogram.methods import GetUpdates
 from aiogram.utils.backoff import Backoff, BackoffConfig
 
+from config import is_local_run
+
+_LOCAL_CONFLICT_RETRIES = 12
+_LOCAL_CONFLICT_WAIT_SEC = 10.0
+
 if TYPE_CHECKING:
     from aiogram.client.bot import Bot
     from aiogram.types import Update
+
+
+def _notify_admin_conflict() -> None:
+    try:
+        import json
+        import urllib.error
+        import urllib.request
+
+        from config import ADMIN_ID, TELEGRAM_BOT_TOKEN
+
+        if not (ADMIN_ID and TELEGRAM_BOT_TOKEN):
+            return
+        text = (
+            "⚠️ Локальный Gastrobar-бот остановлен (TelegramConflictError).\n\n"
+            "Другой экземпляр уже держит getUpdates.\n"
+            "Закройте все окна с ботом или Revoke token в BotFather.\n\n"
+            "Пока конфликт есть, локальный бот не получает сообщения."
+        )
+        payload = json.dumps(
+            {"chat_id": ADMIN_ID, "text": text},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except (urllib.error.URLError, OSError, ValueError):
+        pass
 
 
 def _exit_on_conflict(context: str) -> None:
@@ -27,8 +63,17 @@ def _exit_on_conflict(context: str) -> None:
         "Процесс завершается без retry.",
         context,
     )
+    _notify_admin_conflict()
     print(
-        "TelegramConflictError: only one getUpdates client allowed. Exiting.",
+        "\n"
+        "=" * 62 + "\n"
+        "  TelegramConflictError — локальный бот НЕ работает\n"
+        "=" * 62 + "\n"
+        "Drugoj ekzemplyar uzhe oprashivaet Telegram.\n\n"
+        "1. Zakroyte VSE okna start_bot.bat\n"
+        "2. scripts\\list_bot_processes.ps1\n"
+        "3. Esli Conflict: BotFather -> Revoke -> novyj token v .env\n"
+        "4. start_bot.bat\n",
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -51,10 +96,24 @@ class FatalConflictDispatcher(Dispatcher):
         if bot.session.timeout:
             kwargs["request_timeout"] = int(bot.session.timeout + polling_timeout)
         failed = False
+        conflict_attempt = 0
         while True:
             try:
                 updates = await bot(get_updates, **kwargs)
+                conflict_attempt = 0
             except TelegramConflictError:
+                if is_local_run() and conflict_attempt < _LOCAL_CONFLICT_RETRIES:
+                    conflict_attempt += 1
+                    loggers.dispatcher.warning(
+                        "listen_updates: conflict %s/%s — ждём %.0fs (другой клиент отпустит getUpdates)",
+                        conflict_attempt,
+                        _LOCAL_CONFLICT_RETRIES,
+                        _LOCAL_CONFLICT_WAIT_SEC,
+                    )
+                    import asyncio
+
+                    await asyncio.sleep(_LOCAL_CONFLICT_WAIT_SEC)
+                    continue
                 _exit_on_conflict("listen_updates")
             except Exception as e:  # noqa: BLE001
                 failed = True

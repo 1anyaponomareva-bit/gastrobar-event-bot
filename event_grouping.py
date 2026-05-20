@@ -14,7 +14,10 @@ from watchability import detect_editorial_type
 
 log = logging.getLogger(__name__)
 
+# Группировка параллельного тура (final matchday): от 3 матчей в одном слоте.
 PARALLEL_KICKOFF_TOLERANCE_MIN = 20
+PARALLEL_BLOCK_MIN_MATCHES = 3
+PARALLEL_BLOCK_LISTED_MATCHES = 6
 
 _LEAGUE_LABELS: list[tuple[str, str]] = (
     ("premier league", "Premier League"),
@@ -72,7 +75,7 @@ def _find_parallel_blocks(events: list[dict[str, Any]]) -> list[list[dict[str, A
 
     blocks: list[list[dict[str, Any]]] = []
     for key, group in buckets.items():
-        if len(group) >= 3:
+        if len(group) >= PARALLEL_BLOCK_MIN_MATCHES:
             blocks.append(group)
             log.info(
                 "parallel football block: league=%s date=%s matches=%s",
@@ -92,27 +95,29 @@ def _block_headline(league: str, group: list[dict[str, Any]]) -> str:
     return f"{league} — параллельный тур"
 
 
+def _is_standalone_football_match(e: dict[str, Any]) -> bool:
+    """Топ-матч / дерби — отдельной строкой, не внутри блока matchday."""
+    from watchability import is_major_weekly_event
+
+    if is_major_weekly_event(e):
+        return True
+    if int(e.get("watchability_score", 0)) >= 52:
+        return True
+    return False
+
+
 def _make_parallel_block_event(
     group: list[dict[str, Any]],
     *,
     tv_count: int | None = None,
 ) -> dict[str, Any]:
-    limit = max(1, int(tv_count if tv_count is not None else GASTROBAR_TV_COUNT))
     ranked = sorted(
         group,
         key=lambda x: -int(x.get("watchability_score", 0)),
     )
-    picks = ranked[:limit]
-    rest = ranked[limit:]
-
-    for e in rest:
-        log.info(
-            "weekly skipped event: title=%r reason=parallel_block_tv_limit block_size=%s",
-            e.get("title"),
-            len(group),
-        )
-
-    anchor = picks[0]
+    listed = ranked[:PARALLEL_BLOCK_LISTED_MATCHES]
+    anchor = ranked[0]
+    tvs = max(1, int(tv_count if tv_count is not None else GASTROBAR_TV_COUNT))
     league = _football_league_label(anchor) or "Топ-футбол"
     wd = str(anchor.get("weekday", "")).strip()
     tm = str(
@@ -133,10 +138,10 @@ def _make_parallel_block_event(
         "subtitle": league,
         "league": league,
         "block_headline": _block_headline(league, group),
-        "block_matches": [str(p.get("title", "")).strip() for p in picks],
+        "block_matches": [str(p.get("title", "")).strip() for p in listed if p.get("title")],
         "block_match_count": len(group),
-        "block_note": "параллельные матчи тура · на 2 экрана в Gastrobar",
-        "watchability_score": max(int(p.get("watchability_score", 0)) for p in picks),
+        "block_note": f"параллельные матчи тура · на {tvs} экрана в Gastrobar",
+        "watchability_score": max(int(p.get("watchability_score", 0)) for p in ranked),
         "editorial_type": "football",
         "confidence": anchor.get("confidence", "medium"),
         "_block_members": [dict(x) for x in group],
@@ -153,31 +158,47 @@ def _event_identity_key(e: dict[str, Any]) -> tuple[str, str, str]:
 
 def apply_grouping_for_weekly_display(
     events: list[dict[str, Any]],
+    *,
+    collapse_blocks: bool = True,
 ) -> list[dict[str, Any]]:
     """
-    Схлопывает 3+ параллельных матча одной лиги в один editorial-блок.
-    Исходный список для cache не меняется — только отображение.
+    Rich weekly: топ-матчи отдельно; 3+ параллельных матча тура — блок с перечислением.
     """
     if not events:
         return []
 
+    if not collapse_blocks:
+        return list(events)
+
     blocks = _find_parallel_blocks(events)
-    member_keys: set[tuple[str, str, str]] = set()
+    standalone_keys: set[tuple[str, str, str]] = set()
     block_by_slot: dict[tuple[str, int, str], list[dict[str, Any]]] = {}
+    member_keys: set[tuple[str, str, str]] = set()
 
     for group in blocks:
         key = _block_group_key(group[0])
         if not key:
             continue
-        block_by_slot[key] = group
-        for e in group:
-            member_keys.add(_event_identity_key(e))
+        standalones = [e for e in group if _is_standalone_football_match(e)]
+        block_members = [e for e in group if e not in standalones]
+        for e in standalones:
+            standalone_keys.add(_event_identity_key(e))
+        if len(block_members) >= PARALLEL_BLOCK_MIN_MATCHES:
+            block_by_slot[key] = block_members
+            for e in block_members:
+                member_keys.add(_event_identity_key(e))
+        else:
+            for e in group:
+                standalone_keys.add(_event_identity_key(e))
 
     display: list[dict[str, Any]] = []
     emitted_blocks: set[tuple[str, int, str]] = set()
 
     for e in events:
         ident = _event_identity_key(e)
+        if ident in standalone_keys:
+            display.append(e)
+            continue
         slot = _block_group_key(e)
         if ident in member_keys and slot and slot in block_by_slot:
             if slot not in emitted_blocks:
@@ -187,10 +208,11 @@ def apply_grouping_for_weekly_display(
         display.append(e)
 
     log.info(
-        "weekly display grouping: in=%s out=%s blocks=%s",
+        "weekly display grouping: in=%s out=%s parallel_blocks=%s standalone=%s",
         len(events),
         len(display),
         len(emitted_blocks),
+        len(standalone_keys),
     )
     return display
 
