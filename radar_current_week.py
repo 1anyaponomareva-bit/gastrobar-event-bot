@@ -56,7 +56,12 @@ _NBA_NHL_RE = re.compile(r"\bnba\b|\bnhl\b|stanley\s+cup", re.I)
 _F1_RE = re.compile(r"formula\s*1|\bf1\b|grand\s+prix", re.I)
 _FOOTBALL_RE = re.compile(
     r"football|soccer|premier\s+league|\bepl\b|champions\s+league|\bucl\b|"
-    r"europa\s+league|\buel\b|la\s+liga|serie\s+a|bundesliga",
+    r"europa\s+league|\buel\b|la\s+liga|serie\s+a|bundesliga|ligue\s+1|"
+    r"espanyol|real\s+sociedad|real\s+madrid|barcelona|atletico",
+    re.I,
+)
+_HOCKEY_BLOB_RE = re.compile(
+    r"\b(nhl|khl|stanley|iihf|world\s+championship|hockey|playoff)\b",
     re.I,
 )
 
@@ -207,6 +212,182 @@ def log_radar_validation(reason: str, e: dict[str, Any], *, phase: str = "") -> 
     log.info("%s: title=%r %s", reason, title, extra)
 
 
+def has_source_timezone(e: dict[str, Any]) -> bool:
+    for key in (
+        "source_timezone",
+        "original_timezone",
+        "timezone",
+    ):
+        raw = str(e.get(key, "")).strip()
+        if raw and raw.lower() not in ("unknown", "none", ""):
+            return True
+    return False
+
+
+def is_in_week_window(e: dict[str, Any]) -> bool:
+    return is_in_current_week(e)
+
+
+def event_watchability_score(e: dict[str, Any]) -> int:
+    score = int(e.get("watchability_score", 0) or e.get("radar_priority_score", 0))
+    if score > 0:
+        return score
+    from watchability import enrich_watchability
+
+    return int(enrich_watchability(dict(e)).get("watchability_score", 0))
+
+
+def is_trusted_radar_category(e: dict[str, Any]) -> bool:
+    """Категории, для которых medium + Gemini Search допустимы без API match."""
+    b = _category_blob(e)
+    cat = str(e.get("category", "")).upper()
+    if _F1_RE.search(b):
+        return True
+    if "ESPORT" in cat or _ESPORTS_ALLOW_RE.search(b):
+        return True
+    if "HOCKEY" in cat or _HOCKEY_BLOB_RE.search(b):
+        return True
+    if _NBA_NHL_RE.search(b):
+        return True
+    if "FOOT" in cat or "SOCCER" in cat or _FOOTBALL_RE.search(b):
+        return True
+    if "eurovision" in b:
+        return True
+    return False
+
+
+def passes_medium_weekly_radar(e: dict[str, Any]) -> bool:
+    """
+    Medium/high из Gemini Search: datetime + неделя + timezone + trusted category.
+    Не требует API-SPORTS exact match.
+    """
+    from event_participants import has_matchup_in_title
+    from next24 import resolve_event_local_datetime_vn
+
+    conf = str(e.get("confidence", "medium")).lower()
+    if conf not in ("high", "medium"):
+        return False
+
+    title = str(e.get("title", "")).strip()
+    if len(title) < 4:
+        return False
+
+    if resolve_event_local_datetime_vn(e) is None:
+        return False
+
+    if not is_in_week_window(e):
+        return False
+
+    if not has_source_timezone(e):
+        return False
+
+    if not is_trusted_radar_category(e):
+        return False
+
+    via = str(e.get("verified_via", "")).lower()
+    if "gemini" not in via and "api-sports" not in via:
+        return False
+
+    if not has_matchup_in_title(title) and "FOOT" not in str(e.get("category", "")).upper():
+        if not _F1_RE.search(_category_blob(e)) and not _ESPORTS_ALLOW_RE.search(_category_blob(e)):
+            return False
+
+    from config import RADAR_MIN_WATCHABILITY
+
+    floor = max(12, RADAR_MIN_WATCHABILITY - 18)
+    if event_watchability_score(e) < floor:
+        b = _category_blob(e)
+        if _FOOTBALL_RE.search(b) and has_matchup_in_title(title):
+            return True
+        if _F1_RE.search(b) or _HOCKEY_BLOB_RE.search(b) or _ESPORTS_ALLOW_RE.search(b):
+            return True
+        return False
+
+    return True
+
+
+def log_radar_gate_reject(
+    e: dict[str, Any],
+    reject_reason_exact: str,
+    *,
+    phase: str = "",
+) -> None:
+    from next24 import resolve_event_local_datetime_vn
+
+    dt = resolve_event_local_datetime_vn(e)
+    log.info(
+        "rejected_unverified_event: title=%r category=%r via=%r confidence=%r "
+        "watchability_score=%s local_datetime=%s is_in_week_window=%s "
+        "has_source_timezone=%s reject_reason_exact=%s phase=%s",
+        e.get("title"),
+        e.get("category"),
+        e.get("verified_via"),
+        e.get("confidence"),
+        event_watchability_score(e),
+        dt.isoformat() if dt else None,
+        is_in_week_window(e),
+        has_source_timezone(e),
+        reject_reason_exact,
+        phase,
+    )
+
+
+def radar_gate_reject_reason(
+    e: dict[str, Any] | None,
+    *,
+    phase: str = "verify",
+    allow_gemini_discovery: bool = False,
+) -> str | None:
+    """Точная причина отказа или None если событие проходит gate."""
+    if not e:
+        return "missing_event"
+
+    title = str(e.get("title", "")).strip()
+    if not title:
+        return "missing_title"
+
+    if not str(e.get("local_datetime") or e.get("utc_datetime") or "").strip():
+        if not (e.get("date") and e.get("time")):
+            return "missing_datetime"
+
+    tz = str(e.get("timezone") or TARGET_TZ.key)
+    if "ho_chi_minh" not in tz.lower() and not e.get("local_datetime"):
+        return "missing_vn_timezone"
+
+    hist = detect_historical_hallucination(e)
+    if hist:
+        return hist
+
+    if not is_in_week_window(e):
+        return "outside_week_window"
+
+    verified = is_source_verified(e)
+    medium_ok = passes_medium_weekly_radar(e)
+
+    if requires_strict_verification(e) and not verified and not medium_ok:
+        if str(e.get("verified_via", "")).upper() == "API-SPORTS":
+            pass
+        else:
+            return "strict_sport_requires_api_match"
+
+    if not verified and not medium_ok:
+        if allow_gemini_discovery or allows_gemini_discovery_only(e):
+            conf = str(e.get("confidence", "medium")).lower()
+            if conf not in ("high", "medium"):
+                return f"confidence_{conf}_not_allowed"
+        else:
+            if not has_source_timezone(e):
+                return "gemini_no_source_timezone"
+            if not is_trusted_radar_category(e):
+                return "untrusted_category"
+            conf = str(e.get("confidence", "medium")).lower()
+            if conf not in ("high", "medium"):
+                return f"confidence_{conf}_not_allowed"
+            return "not_source_verified_and_not_medium_trusted"
+
+    return None
+
+
 def apply_acceptance_flags(e: dict[str, Any], *, source_verified: bool) -> dict[str, Any]:
     e = dict(e)
     e["timezone"] = "Asia/Ho_Chi_Minh"
@@ -222,56 +403,28 @@ def validate_radar_event(
     allow_gemini_discovery: bool = False,
 ) -> dict[str, Any] | None:
     """
-    Финальный gate перед афишей.
-    allow_gemini_discovery: True только для Eurovision / крупных live-шоу без API.
+    Финальный gate: datetime + неделя + не историческое + title/category.
+    Medium Gemini Search с trusted category — без API exact match.
     """
-    if not e:
+    reject = radar_gate_reject_reason(
+        e, phase=phase, allow_gemini_discovery=allow_gemini_discovery
+    )
+    if reject:
+        log_radar_gate_reject(e, reject, phase=phase)
         return None
 
-    title = str(e.get("title", "")).strip()
-    if not title:
-        log_radar_validation("rejected_missing_datetime", e, phase=phase)
-        return None
-
-    if not str(e.get("local_datetime") or e.get("utc_datetime") or "").strip():
-        if not (e.get("date") and e.get("time")):
-            log_radar_validation("rejected_missing_datetime", e, phase=phase)
-            return None
-
-    tz = str(e.get("timezone") or TARGET_TZ.key)
-    if "ho_chi_minh" not in tz.lower() and not e.get("local_datetime"):
-        log_radar_validation("rejected_missing_datetime", e, phase=phase)
-        return None
-
-    hist = detect_historical_hallucination(e)
-    if hist:
-        log_radar_validation(hist, e, phase=phase)
-        return None
-
-    if not is_in_current_week(e):
-        log_radar_validation("rejected_old_event", e, phase=phase)
-        return None
-
-    verified = is_source_verified(e)
-    if requires_strict_verification(e) and not verified:
-        if str(e.get("verified_via", "")).upper() == "API-SPORTS":
-            verified = True
-        else:
-            log_radar_validation("rejected_unverified_event", e, phase=phase)
-            return None
-
-    if not verified:
-        gemini_ok = allow_gemini_discovery or allows_gemini_discovery_only(e)
-        if not gemini_ok:
-            log_radar_validation("rejected_unverified_event", e, phase=phase)
-            return None
-        conf = str(e.get("confidence", "medium")).lower()
-        if conf not in ("high", "medium"):
-            log_radar_validation("rejected_unverified_event", e, phase=phase)
-            return None
-
-    out = apply_acceptance_flags(e, source_verified=verified)
-    log_radar_validation("accepted_current_week_event", out, phase=phase)
+    out = apply_acceptance_flags(e, source_verified=is_source_verified(e))
+    log.info(
+        "accepted_current_week_event: title=%r via=%r confidence=%r "
+        "watchability=%s medium_trusted=%s source_verified=%s phase=%s",
+        out.get("title"),
+        out.get("verified_via"),
+        out.get("confidence"),
+        event_watchability_score(e),
+        passes_medium_weekly_radar(e),
+        out.get("source_verified"),
+        phase,
+    )
     return out
 
 

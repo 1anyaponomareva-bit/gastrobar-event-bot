@@ -751,6 +751,13 @@ def _gemini_verify_sync(event: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _log_verify_removed(title: str, reason: str, event: dict[str, Any]) -> None:
+    from radar_current_week import (
+        event_watchability_score,
+        has_source_timezone,
+        is_in_week_window,
+    )
+    from next24 import resolve_event_local_datetime_vn
+
     missing = []
     if not str(event.get("date", "")).strip():
         missing.append("date")
@@ -758,12 +765,21 @@ def _log_verify_removed(title: str, reason: str, event: dict[str, Any]) -> None:
         missing.append("time")
     if not str(event.get("title", "")).strip():
         missing.append("title")
+    dt = resolve_event_local_datetime_vn(event)
     logger.info(
-        "verify_removed: reason=%s title=%r missing_fields=%s event=%s",
+        "verify_removed: reject_reason_exact=%s title=%r category=%r via=%r "
+        "confidence=%r watchability_score=%s local_datetime=%s is_in_week_window=%s "
+        "has_source_timezone=%s missing_fields=%s",
         reason,
         title,
+        event.get("category"),
+        event.get("verified_via"),
+        event.get("confidence"),
+        event_watchability_score(event),
+        dt.isoformat() if dt else None,
+        is_in_week_window(event),
+        has_source_timezone(event),
         missing or "none",
-        {k: event.get(k) for k in ("date", "time", "title", "category", "source_timezone")},
     )
 
 
@@ -987,7 +1003,18 @@ async def verify_event(event: dict[str, Any]) -> dict[str, Any] | None:
             allow_gemini_discovery=allow_gemini,
         )
         if validated is None:
-            _log_verify_removed(title, "current_week_or_source_gate", event)
+            from radar_current_week import radar_gate_reject_reason
+
+            exact = radar_gate_reject_reason(
+                out,
+                phase="verify",
+                allow_gemini_discovery=allow_gemini,
+            )
+            _log_verify_removed(
+                title,
+                exact or "current_week_gate_unknown",
+                out,
+            )
             return None
 
         logger.info(
