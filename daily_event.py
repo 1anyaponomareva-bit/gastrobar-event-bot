@@ -263,10 +263,10 @@ def select_now24_events(
 ) -> list[dict[str, Any]]:
     """NOW24 из того же normalized pool: окно 24 ч, сортировка по datetime."""
     from event_radar_pipeline import (
-        cap_now24_chronological,
+        finalize_now24_output,
         in_time_window,
         normalize_radar_event,
-        sort_events_chronological,
+        pipeline_finalize_events,
     )
     from next24 import log_next24_window_header
 
@@ -287,11 +287,10 @@ def select_now24_events(
         return []
 
     candidates = _prune_weak_rpl_if_strong_alternatives(candidates)
-    selected = cap_now24_chronological(candidates)
-    selected = [
-        enrich_daily_campaign_meta(e, now)
-        for e in sort_events_chronological(selected)
-    ]
+    if not candidates and pool:
+        candidates = pipeline_finalize_events(pool, mode="now24")
+    selected = finalize_now24_output(candidates)
+    selected = [enrich_daily_campaign_meta(e, now) for e in selected]
     for e in selected:
         dt = event_start_datetime_vn(e)
         log.info(

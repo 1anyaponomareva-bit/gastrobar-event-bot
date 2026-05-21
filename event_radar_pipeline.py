@@ -1,5 +1,7 @@
 """
-Единый Event Radar pipeline: collect → normalize (VN) → filter → sort → NOW24 / WEEK.
+Единый Event Radar pipeline (WEEK и NOW24 из одного массива).
+
+collect → normalize (VN) → watchability score → filter_low_quality_only → dedupe → sort → slice.
 """
 
 from __future__ import annotations
@@ -7,17 +9,21 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from config import NOW24_MAX_ITEMS, NOW24_MIN_ITEMS, RADAR_MIN_WATCHABILITY
+from config import NOW24_MAX_ITEMS, RADAR_WEEKLY_MAX, RADAR_WEEKLY_TARGET_MIN
 from next24 import resolve_event_local_datetime_vn, vn_now
 
 log = logging.getLogger(__name__)
 
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 WindowMode = Literal["now24", "week", "master"]
+
+WEEKLY_SOFT_CAP = min(25, max(RADAR_WEEKLY_TARGET_MIN, int(RADAR_WEEKLY_MAX) if RADAR_WEEKLY_MAX < 100 else 25))
+
+_WD = ("ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС")
 
 _F1_SESSION_RE = re.compile(
     r"\b(practice\s*[123]?|fp[123]|qualifying|sprint|race|grand\s*prix)\b",
@@ -28,20 +34,27 @@ _ESPORTS_GAME_RE = re.compile(
     re.I,
 )
 _ESPORTS_TOUR_RE = re.compile(
-    r"\b(dreamleague|dream\s+league|blast|major|esl|iem|pgl|betboom|msi|worlds)\b",
+    r"\b(dreamleague|dream\s+league|blast|major|esl|iem|pgl|betboom|msi|worlds|"
+    r"navi|spirit|liquid|falcons|tundra|virtus|mouz|g2)\b",
     re.I,
 )
 _HOCKEY_RE = re.compile(
-    r"\b(nhl|khl|stanley|iihf|world\s+championship|хоккей|hockey)\b",
+    r"\b(nhl|khl|stanley|iihf|world\s+championship|хоккей|hockey|playoff)\b",
+    re.I,
+)
+_WORLD_HOCKEY_NATIONS = re.compile(
+    r"\b(latvia|finland|canada|norway|denmark|slovakia|switzerland|germany|"
+    r"sweden|czech|usa|austria|france|poland|italy|great\s+britain|uk)\b",
     re.I,
 )
 _FOOTBALL_RE = re.compile(
-    r"\b(uefa|champions\s+league|europa\s+league|premier\s+league|la\s+liga|"
-    r"serie\s+a|bundesliga|ligue\s+1|rpl|российск|кубок\s+рф)\b",
+    r"\b(uefa|champions\s+league|europa\s+league|conference\s+league|premier\s+league|"
+    r"la\s+liga|serie\s+a|bundesliga|ligue\s+1|rpl|российск|кубок|cup\s+final)\b",
     re.I,
 )
-_FOOTBALL_FALSE_CHAMP = re.compile(
-    r"\bchampionship\b",
+_JUNK_LEAGUE_RE = re.compile(
+    r"\b(u21|youth|reserve|friendly|товарищ|women'?s\s+league|"
+    r"2nd\s+division|third\s+division|amateur)\b",
     re.I,
 )
 
@@ -49,43 +62,75 @@ _FOOTBALL_FALSE_CHAMP = re.compile(
 @dataclass
 class RadarPipelineStats:
     label: str = "radar"
-    total_raw: int = 0
+    raw_found: int = 0
     after_normalize: int = 0
-    after_window: int = 0
-    after_priority: int = 0
+    after_time_window: int = 0
+    after_dedupe: int = 0
+    after_score: int = 0
     final_selected: int = 0
+    football_found: int = 0
+    hockey_found: int = 0
+    f1_found: int = 0
+    esports_found: int = 0
+    nba_found: int = 0
+    other_found: int = 0
     drops: dict[str, int] = field(default_factory=dict)
 
-    def drop(self, reason: str, n: int = 1) -> None:
-        self.drops[reason] = self.drops.get(reason, 0) + n
+    def drop(self, reason: str, *, event: dict[str, Any] | None = None) -> None:
+        self.drops[reason] = self.drops.get(reason, 0) + 1
+        if event is not None:
+            log.info(
+                "DROP event=%r sport=%s reason=%s local=%s",
+                (event.get("title") or "")[:80],
+                event.get("sport"),
+                reason,
+                event.get("local_datetime"),
+            )
+
+    def count_categories(self, events: list[dict[str, Any]]) -> None:
+        self.football_found = sum(1 for e in events if e.get("sport") == "football")
+        self.hockey_found = sum(1 for e in events if e.get("sport") == "hockey")
+        self.f1_found = sum(1 for e in events if e.get("sport") == "formula1")
+        self.esports_found = sum(1 for e in events if e.get("sport") == "esports")
+        self.nba_found = sum(1 for e in events if e.get("sport") == "basketball")
+        self.other_found = len(events) - (
+            self.football_found
+            + self.hockey_found
+            + self.f1_found
+            + self.esports_found
+            + self.nba_found
+        )
 
     def flush(self) -> None:
         log.info(
-            "%s TOTAL_RAW_EVENTS=%s AFTER_NORMALIZE=%s AFTER_WINDOW=%s "
-            "AFTER_PRIORITY=%s FINAL_SELECTED=%s drops=%s",
+            "%s RAW_FOUND=%s AFTER_NORMALIZE=%s AFTER_TIME_WINDOW=%s "
+            "AFTER_DEDUPE=%s AFTER_SCORE=%s FINAL_SELECTED=%s | "
+            "FOOTBALL_FOUND=%s HOCKEY_FOUND=%s F1_FOUND=%s ESPORTS_FOUND=%s "
+            "NBA_FOUND=%s OTHER_FOUND=%s drops=%s",
             self.label,
-            self.total_raw,
+            self.raw_found,
             self.after_normalize,
-            self.after_window,
-            self.after_priority,
+            self.after_time_window,
+            self.after_dedupe,
+            self.after_score,
             self.final_selected,
+            self.football_found,
+            self.hockey_found,
+            self.f1_found,
+            self.esports_found,
+            self.nba_found,
+            self.other_found,
             self.drops,
         )
-        if self.after_window == 0 and self.after_normalize > 0:
-            log.warning(
-                "%s after_window=0 but after_normalize=%s — проверьте datetime/timezone",
-                self.label,
-                self.after_normalize,
-            )
+
+
+def _wd_short(d: datetime) -> str:
+    return _WD[d.weekday()]
 
 
 def format_day_label(event_local: datetime, now_local: datetime | None = None) -> str:
-    """СЕГОДНЯ / ЗАВТРА / ПТ … в timezone Asia/Ho_Chi_Minh."""
     now_local = now_local or vn_now()
-    if event_local.tzinfo is None:
-        event_local = event_local.replace(tzinfo=VN_TZ)
-    else:
-        event_local = event_local.astimezone(VN_TZ)
+    event_local = event_local.astimezone(VN_TZ)
     now_local = now_local.astimezone(VN_TZ)
     d = event_local.date()
     today = now_local.date()
@@ -93,8 +138,32 @@ def format_day_label(event_local: datetime, now_local: datetime | None = None) -
         return "СЕГОДНЯ"
     if d == today + timedelta(days=1):
         return "ЗАВТРА"
-    wd = ("ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС")
-    return wd[d.weekday()]
+    return _wd_short(event_local)
+
+
+def format_event_day_time(local_dt: datetime, now_local: datetime | None = None) -> str:
+    """
+    Время для афиши. 00:00–05:59 → ночь с предыдущего дня (ПТ→СБ 03:30).
+    """
+    now_local = now_local or vn_now()
+    if local_dt.tzinfo is None:
+        local_dt = local_dt.replace(tzinfo=VN_TZ)
+    else:
+        local_dt = local_dt.astimezone(VN_TZ)
+    now_local = now_local.astimezone(VN_TZ)
+    hhmm = local_dt.strftime("%H:%M")
+    day_lbl = format_day_label(local_dt, now_local)
+
+    if local_dt.hour < 6:
+        prev = local_dt - timedelta(days=1)
+        prev_s, cur_s = _wd_short(prev), _wd_short(local_dt)
+        if day_lbl in ("СЕГОДНЯ", "ЗАВТРА"):
+            return f"🌙 {day_lbl} {prev_s}→{cur_s} {hhmm}"
+        return f"🌙 {prev_s}→{cur_s} {hhmm}"
+
+    if day_lbl in ("СЕГОДНЯ", "ЗАВТРА"):
+        return f"{day_lbl} {hhmm}"
+    return f"{_wd_short(local_dt)} {hhmm}"
 
 
 def event_datetime_vn(e: dict[str, Any]) -> datetime | None:
@@ -105,15 +174,9 @@ def window_bounds(
     mode: WindowMode,
     now: datetime | None = None,
 ) -> tuple[datetime, datetime]:
-    now_local = now or vn_now()
-    if now_local.tzinfo is None:
-        now_local = now_local.replace(tzinfo=VN_TZ)
-    else:
-        now_local = now_local.astimezone(VN_TZ)
+    now_local = (now or vn_now()).astimezone(VN_TZ)
     if mode == "now24":
         return now_local, now_local + timedelta(hours=24)
-    if mode == "week":
-        return now_local, now_local + timedelta(days=7)
     return now_local, now_local + timedelta(days=7)
 
 
@@ -125,15 +188,10 @@ def in_time_window(
 ) -> bool:
     start, end = window_bounds(mode, now)
     dt = event_datetime_vn(e)
-    if dt is None:
-        return False
-    return start <= dt <= end
+    return dt is not None and start <= dt <= end
 
 
 def resolve_sport_display(e: dict[str, Any]) -> dict[str, Any]:
-    """
-    Канонический sport / category / emoji. Хоккей проверяем до футбольных эвристик.
-    """
     blob = (
         f"{e.get('sport','')} {e.get('category','')} {e.get('title','')} "
         f"{e.get('subtitle','')} {e.get('league','')}"
@@ -142,29 +200,24 @@ def resolve_sport_display(e: dict[str, Any]) -> dict[str, Any]:
 
     if sport_raw in ("hockey", "formula1", "f1", "esports", "basketball", "football", "mma"):
         sport = "formula1" if sport_raw == "f1" else sport_raw
-    elif _HOCKEY_RE.search(blob) and not (
-        _FOOTBALL_RE.search(blob)
-        and not _HOCKEY_RE.search(str(e.get("title", "")).lower())
+    elif _HOCKEY_RE.search(blob) or _WORLD_HOCKEY_NATIONS.search(
+        str(e.get("title", "")).lower()
     ):
         sport = "hockey"
-    elif _F1_SESSION_RE.search(blob) or "formula" in blob or sport_raw == "formula1":
+    elif _F1_SESSION_RE.search(blob) or "formula" in blob:
         sport = "formula1"
-    elif _ESPORTS_GAME_RE.search(blob) or _ESPORTS_TOUR_RE.search(blob) or sport_raw == "esports":
+    elif _ESPORTS_GAME_RE.search(blob) or _ESPORTS_TOUR_RE.search(blob):
         sport = "esports"
     elif sport_raw == "basketball" or "nba" in blob:
         sport = "basketball"
-    elif (
-        _FOOTBALL_RE.search(blob)
-        or "football" in str(e.get("category", "")).lower()
-        or sport_raw == "football"
-    ):
+    elif _FOOTBALL_RE.search(blob) or sport_raw == "football":
         sport = "football"
     else:
         sport = sport_raw or "other"
 
     mapping = {
         "football": ("FOOTBALL", "⚽", "football"),
-        "hockey": ("HOCKEY", "🏒", "nhl"),
+        "hockey": ("HOCKEY", "🏒", "hockey"),
         "formula1": ("SPORTS", "🏎", "f1"),
         "esports": ("ESPORTS", "🎮", "esports"),
         "basketball": ("BASKETBALL", "🏀", "nba"),
@@ -181,37 +234,31 @@ def resolve_sport_display(e: dict[str, Any]) -> dict[str, Any]:
 
 def _f1_display_subtitle(e: dict[str, Any]) -> str:
     blob = f"{e.get('title','')} {e.get('subtitle','')} {e.get('league','')}"
-    gp = ""
-    m = re.search(r"\b([A-Za-z][A-Za-z\s]{2,30})\s+GP\b", blob, re.I)
-    if m:
-        gp = m.group(0).strip()
+    gp_m = re.search(r"\b([A-Za-z][A-Za-z\s]{2,40})\s+GP\b", blob, re.I)
+    gp = gp_m.group(0).strip() if gp_m else ""
     session = ""
-    for pat, label in (
-        (_F1_SESSION_RE, None),
+    for label, pat in (
+        ("Practice 1", r"practice\s*1|fp1"),
+        ("Practice 2", r"practice\s*2|fp2"),
+        ("Practice 3", r"practice\s*3|fp3"),
+        ("Sprint Qualifying", r"sprint\s+qualifying"),
+        ("Sprint", r"\bsprint\b"),
+        ("Qualifying", r"qualifying"),
+        ("Race", r"\brace\b"),
     ):
-        m2 = pat.search(blob)
-        if m2:
-            session = m2.group(0).strip().title()
+        if re.search(pat, blob, re.I):
+            session = label
             break
-    if not session:
-        if "qualifying" in blob.lower():
-            session = "Qualifying"
-        elif "practice" in blob.lower() or "fp" in blob.lower():
-            session = "Practice"
-        elif "sprint" in blob.lower():
-            session = "Sprint"
-        elif "race" in blob.lower():
-            session = "Race"
     parts = ["Formula 1"]
     if gp:
-        parts.append(gp)
+        parts.append(gp.replace(" GP", " Grand Prix"))
     if session:
         parts.append(session)
-    return " · ".join(parts) if len(parts) > 1 else (parts[0] if parts else "Formula 1")
+    return " · ".join(parts) if len(parts) > 1 else "Formula 1"
 
 
-def compute_radar_priority_score(e: dict[str, Any]) -> int:
-    from watchability import enrich_watchability, is_major_weekly_event
+def calculate_watchability_score(e: dict[str, Any]) -> int:
+    from watchability import enrich_watchability
 
     ev = enrich_watchability(dict(e))
     base = int(ev.get("watchability_score", 0))
@@ -220,26 +267,27 @@ def compute_radar_priority_score(e: dict[str, Any]) -> int:
     blob = f"{ev.get('title','')} {ev.get('subtitle','')} {ev.get('league','')}".lower()
     sport = str(ev.get("sport", "")).lower()
 
-    if is_major_weekly_event(ev):
-        score += 18
-    if re.search(r"\b(final|playoff|play-off|semi|quarter|matchday)\b", blob, re.I):
-        score += 12
-    if sport == "formula1" or str(ev.get("editorial_type")) == "f1":
-        score += 14
-    if sport == "hockey" and re.search(r"\b(nhl|stanley|world\s+championship|khl)\b", blob, re.I):
-        score += 12
-    if sport == "esports" and _ESPORTS_TOUR_RE.search(blob):
-        score += 14
-    if re.search(r"\b(champions\s+league|europa\s+league|ucl|uel)\b", blob, re.I):
-        score += 16
-    if _ESPORTS_GAME_RE.search(blob):
-        score += 8
+    if sport == "formula1":
+        score = max(score, 55)
+    if sport == "hockey":
+        score = max(score, 50)
+        if _WORLD_HOCKEY_NATIONS.search(blob) or "world championship" in blob:
+            score = max(score, 62)
+        if "playoff" in blob or "stanley" in blob:
+            score = max(score, 58)
+    if sport == "esports":
+        score = max(score, 48)
+        if _ESPORTS_TOUR_RE.search(blob):
+            score = max(score, 58)
+    if sport == "football":
+        score = max(score, fs, 45)
+    if re.search(r"\b(final|playoff|semi|quarter)\b", blob, re.I):
+        score += 10
 
     return min(100, score)
 
 
 def normalize_radar_event(e: dict[str, Any]) -> dict[str, Any] | None:
-    """Timezone-aware VN datetime + sport mapping + priority score."""
     ev = resolve_sport_display(dict(e))
     dt = event_datetime_vn(ev)
     if dt is None:
@@ -248,26 +296,24 @@ def normalize_radar_event(e: dict[str, Any]) -> dict[str, Any] | None:
     ev["event_datetime_vn"] = dt
     ev["local_date"] = dt.date().isoformat()
     ev["local_time"] = dt.strftime("%H:%M")
-    wd = ("ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС")
-    ev["local_weekday"] = wd[dt.weekday()]
+    ev["local_weekday"] = _wd_short(dt)
     ev["weekday"] = ev["local_weekday"]
     ev["display_time"] = ev["local_time"]
     ev["timezone"] = "Asia/Ho_Chi_Minh"
 
-    if str(ev.get("sport")) == "formula1":
+    if ev["sport"] == "formula1":
         ev["subtitle"] = _f1_display_subtitle(ev)
         ev["league"] = ev["subtitle"]
-    elif str(ev.get("sport")) == "esports":
-        title = str(ev.get("title", ""))
-        if _ESPORTS_GAME_RE.search(title.lower()):
-            game = "CS2" if "cs" in title.lower() else "Dota 2" if "dota" in title.lower() else "Esports"
-            if not str(ev.get("subtitle", "")).strip():
-                ev["subtitle"] = game
+    elif ev["sport"] == "esports" and not str(ev.get("subtitle", "")).strip():
+        t = str(ev.get("title", "")).lower()
+        if "cs2" in t or "counter" in t:
+            ev["subtitle"] = "CS2"
+        elif "dota" in t:
+            ev["subtitle"] = "Dota 2"
 
-    ev["radar_priority_score"] = compute_radar_priority_score(ev)
-    ev["watchability_score"] = max(
-        int(ev.get("watchability_score", 0)), int(ev["radar_priority_score"])
-    )
+    score = calculate_watchability_score(ev)
+    ev["radar_priority_score"] = score
+    ev["watchability_score"] = score
     return ev
 
 
@@ -278,37 +324,75 @@ def sort_events_chronological(events: list[dict[str, Any]]) -> list[dict[str, An
     )
 
 
-def _passes_content_gate(e: dict[str, Any], *, min_score: int) -> tuple[bool, str]:
+def is_priority_gastrobar_event(e: dict[str, Any]) -> bool:
+    """События, которые нельзя выкидывать из-за score/ranking."""
+    sport = str(e.get("sport", "")).lower()
+    blob = f"{e.get('title','')} {e.get('subtitle','')} {e.get('league','')}".lower()
+
+    if sport == "formula1":
+        return True
+    if sport == "hockey":
+        return True
+    if sport == "esports":
+        return True
+    if sport == "basketball" and ("nba" in blob or "playoff" in blob):
+        return True
+    if sport == "football":
+        from football_watchability import is_eligible_football_league_now24
+
+        item = {
+            "league_id": e.get("league_id"),
+            "league_country": e.get("league_country", ""),
+            "league": e.get("league") or e.get("subtitle", ""),
+            "title": e.get("title", ""),
+        }
+        if is_eligible_football_league_now24(item):
+            return True
+        if _FOOTBALL_RE.search(blob):
+            return True
+    return False
+
+
+def low_quality_drop_reason(e: dict[str, Any]) -> str | None:
+    """Только мусор / вне окна / без времени — не режем приоритетные виды спорта."""
     from event_verifier import gastrobar_hard_reject
-    from gastrobar_event_filter import (
-        passes_gastrobar_content_filters,
-        passes_gastrobar_watchability_floor,
-    )
 
     if gastrobar_hard_reject(e):
-        return False, "hard_reject"
+        return "hard_reject"
 
-    via_api = str(e.get("verified_via", "")).upper() == "API-SPORTS"
-    sport = str(e.get("sport", "")).lower()
-    if via_api and e.get("local_datetime") and sport != "football":
-        floor = max(12, min_score - 16)
-        if int(e.get("radar_priority_score", 0)) >= floor:
-            return True, ""
-        if passes_gastrobar_watchability_floor(e):
-            return True, ""
-        return False, "low_priority"
+    if event_datetime_vn(e) is None:
+        return "bad_datetime"
 
-    ok, ev = passes_gastrobar_content_filters(e, enrich=False)
-    if not ok:
-        return False, "content_filter"
-    if int(ev.get("radar_priority_score", 0)) < min_score and not passes_gastrobar_watchability_floor(
-        ev
-    ):
-        return False, "low_priority"
-    return True, ""
+    if is_priority_gastrobar_event(e):
+        blob = f"{e.get('title','')} {e.get('league','')}".lower()
+        if _JUNK_LEAGUE_RE.search(blob):
+            return "junk_league"
+        return None
+
+    blob = f"{e.get('title','')} {e.get('subtitle','')} {e.get('league','')}".lower()
+    if _JUNK_LEAGUE_RE.search(blob):
+        return "junk_league"
+    if int(e.get("radar_priority_score", 0)) < 12:
+        return "very_low_score"
+    return None
 
 
-async def collect_raw_locked_events() -> tuple[list[dict[str, Any]], int]:
+def filter_low_quality_only(
+    events: list[dict[str, Any]],
+    stats: RadarPipelineStats,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for e in events:
+        reason = low_quality_drop_reason(e)
+        if reason:
+            stats.drop(reason, event=e)
+        else:
+            out.append(e)
+    stats.after_score = len(out)
+    return out
+
+
+async def collect_all_events() -> tuple[list[dict[str, Any]], int]:
     from radar_sports_convert import lock_api_sports_program_item
     from sports_events import (
         _merge_raw_week_events,
@@ -330,61 +414,44 @@ async def collect_raw_locked_events() -> tuple[list[dict[str, Any]], int]:
 
 async def build_master_radar_pool(
     *,
-    stats_label: str = "radar_master",
+    stats_label: str = "radar_collect",
 ) -> tuple[list[dict[str, Any]], RadarPipelineStats]:
     stats = RadarPipelineStats(label=stats_label)
-    locked, raw_n = await collect_raw_locked_events()
-    stats.total_raw = raw_n
+    locked, raw_n = await collect_all_events()
+    stats.raw_found = raw_n
 
     normalized: list[dict[str, Any]] = []
     for e in locked:
         ne = normalize_radar_event(e)
         if ne is None:
-            stats.drop("bad_datetime")
+            stats.drop("bad_datetime", event=e)
             continue
         normalized.append(ne)
     stats.after_normalize = len(normalized)
 
     in_week: list[dict[str, Any]] = []
+    now = vn_now()
     for e in normalized:
-        if in_time_window(e, "week"):
+        if in_time_window(e, "week", now=now):
             in_week.append(e)
         else:
             dt = event_datetime_vn(e)
-            if dt and dt < vn_now():
-                stats.drop("old")
+            if dt and dt < now:
+                stats.drop("old", event=e)
             else:
-                stats.drop("outside_window")
-    stats.after_window = len(in_week)
+                stats.drop("outside_window", event=e)
+    stats.after_time_window = len(in_week)
 
-    min_score = RADAR_MIN_WATCHABILITY
-    filtered: list[dict[str, Any]] = []
-    for e in in_week:
-        ok, reason = _passes_content_gate(e, min_score=min_score)
-        if ok:
-            filtered.append(e)
-        else:
-            stats.drop(reason or "low_priority")
-    stats.after_priority = len(filtered)
-
-    if not filtered and in_week:
-        log.warning(
-            "%s after_priority=0 — ослабляем порог (raw_normalize=%s window=%s)",
-            stats.label,
-            stats.after_normalize,
-            stats.after_window,
-        )
-        relaxed_floor = max(10, min_score - 12)
-        for e in in_week:
-            if int(e.get("radar_priority_score", 0)) >= relaxed_floor:
-                filtered.append(e)
-        stats.drop("relaxed_pass", len(filtered))
-        stats.after_priority = len(filtered)
+    scored = filter_low_quality_only(in_week, stats)
 
     from radar_dedupe import dedupe_events
 
-    out = sort_events_chronological(dedupe_events(filtered, log_prefix="radar_master", exact=True))
+    deduped = dedupe_events(scored, log_prefix="radar_master", exact=True)
+    stats.after_dedupe = len(deduped)
+
+    out = sort_events_chronological(deduped)
     stats.final_selected = len(out)
+    stats.count_categories(out)
     stats.flush()
     return out, stats
 
@@ -397,71 +464,58 @@ def slice_window(
     stats_label: str | None = None,
 ) -> list[dict[str, Any]]:
     stats = RadarPipelineStats(label=stats_label or f"radar_{mode}")
-    stats.total_raw = len(master)
+    stats.raw_found = len(master)
     picked: list[dict[str, Any]] = []
     for e in master:
         if in_time_window(e, mode, now=now):
             picked.append(e)
         else:
-            stats.drop("outside_window")
-    stats.after_window = len(picked)
-    stats.after_priority = len(picked)
+            stats.drop("outside_window", event=e)
+    stats.after_time_window = len(picked)
+    stats.after_dedupe = len(picked)
+    stats.after_score = len(picked)
     out = sort_events_chronological(picked)
     stats.final_selected = len(out)
+    stats.count_categories(out)
     stats.flush()
     return out
 
 
-def cap_now24_chronological(
-    events: list[dict[str, Any]],
-    *,
-    max_items: int | None = None,
-    min_items: int | None = None,
-) -> list[dict[str, Any]]:
-    """Без round-robin: первые N по времени; при нехватке — ослабление порога."""
-    max_items = max_items if max_items is not None else NOW24_MAX_ITEMS
-    min_items = min_items if min_items is not None else NOW24_MIN_ITEMS
-    sorted_ev = sort_events_chronological(events)
-    if len(sorted_ev) <= max_items:
-        out = sorted_ev
-    else:
-        out = sorted_ev[:max_items]
+def finalize_week_output(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """10–25+ событий: все категории, хронология; мягкий cap только если >25."""
+    out = sort_events_chronological(events)
+    if len(out) > WEEKLY_SOFT_CAP:
+        log.info(
+            "WEEK soft cap: %s -> %s (chronological head)",
+            len(out),
+            WEEKLY_SOFT_CAP,
+        )
+        out = out[:WEEKLY_SOFT_CAP]
+    return out
 
-    if len(out) < min(min_items, len(sorted_ev)) and len(sorted_ev) > len(out):
-        from gastrobar_event_filter import passes_gastrobar_content_filters
 
-        relaxed: list[dict[str, Any]] = []
-        floor = max(12, RADAR_MIN_WATCHABILITY - 10)
-        for e in sorted_ev:
-            if int(e.get("radar_priority_score", 0)) >= floor:
-                relaxed.append(e)
-            elif passes_gastrobar_content_filters(e, enrich=False)[0]:
-                relaxed.append(e)
-        out = sort_events_chronological(relaxed)[: max(max_items, min_items)]
-
-    log.info(
-        "NOW24 cap chronological: candidates=%s final=%s max=%s min=%s",
-        len(events),
-        len(out),
-        max_items,
-        min_items,
-    )
+def finalize_now24_output(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Все события в 24 ч по времени, без score-ranking."""
+    out = sort_events_chronological(events)
+    if len(out) > NOW24_MAX_ITEMS:
+        log.info("NOW24 cap: %s -> %s (by datetime)", len(out), NOW24_MAX_ITEMS)
+        out = out[:NOW24_MAX_ITEMS]
     return out
 
 
 async def get_now24_from_pipeline() -> tuple[list[dict[str, Any]], int, str | None]:
     master, stats = await build_master_radar_pool(stats_label="radar_collect")
     sliced = slice_window(master, "now24", stats_label="radar_now24")
-    final = cap_now24_chronological(sliced)
+    final = finalize_now24_output(sliced)
     note = "api_unified" if final else "api_filter_empty"
-    return final, stats.total_raw, note
+    return final, stats.raw_found, note
 
 
 async def get_week_from_pipeline() -> tuple[list[dict[str, Any]], int, str | None]:
     master, stats = await build_master_radar_pool(stats_label="radar_collect")
-    final = slice_window(master, "week", stats_label="radar_week")
+    final = finalize_week_output(master)
     note = "api_unified" if final else "api_filter_empty"
-    return final, stats.total_raw, note
+    return final, stats.raw_found, note
 
 
 def enrich_events_for_display(
@@ -469,7 +523,6 @@ def enrich_events_for_display(
     *,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Добавляет day_label для форматтера (строго после сортировки по времени)."""
     now_local = now or vn_now()
     out: list[dict[str, Any]] = []
     for e in sort_events_chronological(events):
@@ -477,6 +530,42 @@ def enrich_events_for_display(
         dt = event_datetime_vn(ev)
         if dt:
             ev["day_label"] = format_day_label(dt, now_local)
-            ev["local_weekday"] = ev["day_label"]
+            ev["display_day_time"] = format_event_day_time(dt, now_local)
+            ev["local_weekday"] = _wd_short(dt)
         out.append(ev)
+    return out
+
+
+def pipeline_finalize_events(
+    events: list[dict[str, Any]],
+    *,
+    mode: WindowMode,
+) -> list[dict[str, Any]]:
+    """Нормализация произвольного списка (Gemini/cache) тем же pipeline."""
+    stats = RadarPipelineStats(label=f"radar_{mode}_legacy")
+    normalized: list[dict[str, Any]] = []
+    for e in events:
+        ne = normalize_radar_event(e)
+        if ne is None:
+            stats.drop("bad_datetime", event=e)
+            continue
+        if not in_time_window(ne, mode):
+            stats.drop("outside_window", event=ne)
+            continue
+        normalized.append(ne)
+    stats.after_normalize = len(normalized)
+    stats.after_time_window = len(normalized)
+    scored = filter_low_quality_only(normalized, stats)
+    from radar_dedupe import dedupe_events
+
+    deduped = dedupe_events(scored, log_prefix=f"radar_{mode}_legacy", exact=True)
+    stats.after_dedupe = len(deduped)
+    out = sort_events_chronological(deduped)
+    if mode == "now24":
+        out = finalize_now24_output(out)
+    else:
+        out = finalize_week_output(out)
+    stats.final_selected = len(out)
+    stats.count_categories(out)
+    stats.flush()
     return out

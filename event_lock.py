@@ -250,15 +250,18 @@ def format_locked_weekly_afisha(
             continue
 
         em = str(e.get("emoji", "🏟")).strip()
-        wd = str(e.get("day_label") or e.get("local_weekday") or e.get("weekday", "")).strip()
-        tm = str(e.get("local_time") or e.get("display_time", "")).strip()
+        when = str(e.get("display_day_time", "")).strip()
+        if not when:
+            wd = str(e.get("day_label") or e.get("local_weekday") or e.get("weekday", "")).strip()
+            tm = str(e.get("local_time") or e.get("display_time", "")).strip()
+            when = f"{wd} {tm}".strip()
         title = _normalize_now24_match_title(
             str(e.get("title", "")).strip(),
             now24=now24,
         )
         sub = str(e.get("subtitle", e.get("league", ""))).strip()
 
-        lines.append(f"{em} {wd} {tm}")
+        lines.append(f"{em} {when}")
         lines.append(title)
         if sub and sub.lower() not in title.lower():
             lines.append(sub)
