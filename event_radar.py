@@ -1438,6 +1438,22 @@ async def get_event_radar_week(
                 "weekly_cache_quota",
             )
 
+    from event_radar_pipeline import get_week_from_pipeline
+
+    final_api, raw_api, note_api = await get_week_from_pipeline()
+    if final_api:
+        log.info(
+            "Event Radar week: unified API first raw=%s final=%s",
+            raw_api,
+            len(final_api),
+        )
+        await save_weekly_events_cache(final_api, source="api_unified")
+        return final_api, raw_api, raw_api, len(final_api), note_api or "api_unified"
+
+    log.info(
+        "Event Radar week: unified API empty (raw=%s) — fallback Gemini pipeline",
+        raw_api,
+    )
     pool, raw_total, prelim, fetch_note = await _fetch_radar_pipeline(
         force_gemini=False,
     )

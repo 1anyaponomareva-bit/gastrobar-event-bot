@@ -92,11 +92,19 @@ def _event_local_date(e: dict[str, Any]) -> date | None:
 
 
 def is_in_current_week(e: dict[str, Any]) -> bool:
-    d = _event_local_date(e)
-    if d is None:
-        return False
-    start, end = current_week_bounds()
-    return start <= d <= end
+    """Совпадает с event_radar_pipeline: now <= event_local <= now + 7 дней (VN)."""
+    from next24 import resolve_event_local_datetime_vn, vn_now
+
+    dt = resolve_event_local_datetime_vn(e)
+    if dt is None:
+        d = _event_local_date(e)
+        if d is None:
+            return False
+        start, end = current_week_bounds()
+        return start <= d <= end
+    now_local = vn_now()
+    end_local = now_local + timedelta(days=7)
+    return now_local <= dt <= end_local
 
 
 def is_source_verified(e: dict[str, Any]) -> bool:
@@ -171,7 +179,7 @@ def soft_medium_allowed() -> bool:
 
 
 def allows_gemini_discovery_only(e: dict[str, Any]) -> bool:
-    """Разрешить Gemini Search без API: Eurovision, F1 с locked UTC, премии."""
+    """Разрешить Gemini Search без API: Eurovision, F1, NHL/NBA плей-офф с locked VN time."""
     if is_source_verified(e):
         return True
     b = _category_blob(e)
@@ -181,6 +189,11 @@ def allows_gemini_discovery_only(e: dict[str, Any]) -> bool:
         return True
     if re.search(r"\b(oscar|grammy|emmy|golden\s+globe|academy\s+award)\b", b, re.I):
         return True
+    if e.get("local_datetime") and e.get("utc_datetime"):
+        if _NBA_NHL_RE.search(b) and re.search(
+            r"playoff|conference\s+final|stanley|finals|\bfinal\b", b, re.I
+        ):
+            return True
     return False
 
 

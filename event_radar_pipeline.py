@@ -279,10 +279,24 @@ def sort_events_chronological(events: list[dict[str, Any]]) -> list[dict[str, An
 
 
 def _passes_content_gate(e: dict[str, Any], *, min_score: int) -> tuple[bool, str]:
+    from event_verifier import gastrobar_hard_reject
     from gastrobar_event_filter import (
         passes_gastrobar_content_filters,
         passes_gastrobar_watchability_floor,
     )
+
+    if gastrobar_hard_reject(e):
+        return False, "hard_reject"
+
+    via_api = str(e.get("verified_via", "")).upper() == "API-SPORTS"
+    sport = str(e.get("sport", "")).lower()
+    if via_api and e.get("local_datetime") and sport != "football":
+        floor = max(12, min_score - 16)
+        if int(e.get("radar_priority_score", 0)) >= floor:
+            return True, ""
+        if passes_gastrobar_watchability_floor(e):
+            return True, ""
+        return False, "low_priority"
 
     ok, ev = passes_gastrobar_content_filters(e, enrich=False)
     if not ok:

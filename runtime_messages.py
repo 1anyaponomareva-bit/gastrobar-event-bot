@@ -5,7 +5,7 @@ from __future__ import annotations
 from config import GEMINI_API_KEY, RUN_MODE, is_local_run, is_railway_run
 
 # Меняйте при деплое — по этой метке видно, какой код ответил в Telegram.
-BOT_BUILD_ID = "event-radar-unified-pipeline-20260521"
+BOT_BUILD_ID = "event-radar-api-first-fix-20260521"
 
 GEMINI_TROUBLESHOOT = (
     "Проверьте GEMINI_API_KEY через /check и посмотрите логи в терминале, "
@@ -88,8 +88,9 @@ def format_now24_empty_message(
         lines.extend(
             [
                 "",
-                f"Из API было **{pool_count}** матчей, но после фильтров или окна 24 ч "
-                "ничего не осталось. В Railway в логах ищите `NOW24_FILTER` и `drop_window`.",
+                f"Из API было **{pool_count}** матчей, но в ближайшие **24 ч** (Нячанг) "
+                "ничего не попало — старт позже (смотрите **Афишу на неделю**). "
+                "В логах: `radar_now24` / `outside_window`.",
             ]
         )
     else:
