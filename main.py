@@ -314,7 +314,7 @@ async def _answer_radar_empty(
     )
     from weekly_events_cache import get_weekly_events_cache_for_display
 
-    if fetch_note in ("betboom_unavailable", "betboom_parse_error"):
+    if fetch_note in ("betboom_unavailable", "betboom_parse_error", "betboom_empty_line"):
         from betboom_parser import format_betboom_unavailable_message
 
         cached = await get_weekly_events_cache_for_display()

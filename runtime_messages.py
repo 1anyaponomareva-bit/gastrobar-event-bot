@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 # Меняйте при деплое — по этой метке видно, какой код ответил в Telegram.
 
-BOT_BUILD_ID = "event-radar-no-gemini-search-20260522"
+BOT_BUILD_ID = "event-radar-betboom-ws-20260522b"
 
 
 
@@ -90,6 +90,7 @@ _FETCH_NOTE_TO_CODE: dict[str, str] = {
     "betboom_cache": "api_ok_empty",
     "betboom_unavailable": "betboom_unavailable",
     "betboom_parse_error": "betboom_parse_error",
+    "betboom_empty_line": "betboom_parse_error",
     "gemini_quota": "gemini_quota",
     "gemini_search_disabled": "gemini_search_disabled",
     "api_sports_fallback": "api_filter_empty",

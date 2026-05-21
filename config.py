@@ -148,6 +148,10 @@ BETBOOM_API_FALLBACK: bool = os.getenv("BETBOOM_API_FALLBACK", "0").strip().lowe
     "yes",
     "on",
 )
+# Если BetBoom пустой/ошибка — один раз подтянуть API-SPORTS (при живом ключе и не suspended)
+BETBOOM_EMERGENCY_API_FALLBACK: bool = os.getenv(
+    "BETBOOM_EMERGENCY_API_FALLBACK", "1"
+).strip().lower() in ("1", "true", "yes", "on")
 RADAR_GEMINI_DISCOVERY: bool = os.getenv("RADAR_GEMINI_DISCOVERY", "0").strip().lower() in (
     "1",
     "true",
@@ -156,7 +160,7 @@ RADAR_GEMINI_DISCOVERY: bool = os.getenv("RADAR_GEMINI_DISCOVERY", "0").strip().
 )
 
 # Event Radar: общий лимит ожидания (сек), не 4 минуты
-EVENT_RADAR_TIMEOUT_SEC: float = float(os.getenv("EVENT_RADAR_TIMEOUT_SEC", "30") or "30")
+EVENT_RADAR_TIMEOUT_SEC: float = float(os.getenv("EVENT_RADAR_TIMEOUT_SEC", "35") or "35")
 # BetBoom ingest внутри pipeline (Playwright)
-BETBOOM_FETCH_TIMEOUT_SEC: float = float(os.getenv("BETBOOM_FETCH_TIMEOUT_SEC", "25") or "25")
+BETBOOM_FETCH_TIMEOUT_SEC: float = float(os.getenv("BETBOOM_FETCH_TIMEOUT_SEC", "28") or "28")
 BETBOOM_PAGE_TIMEOUT_MS: int = int(os.getenv("BETBOOM_PAGE_TIMEOUT_MS", "12000") or "12000")

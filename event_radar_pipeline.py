@@ -688,7 +688,11 @@ async def collect_all_events(
     elif fetch_note == "api_sports_fallback":
         source = "api"
     log.info("EVENT_RADAR_SOURCE_SELECTED=%s raw=%s", source, len(raw))
-    if fetch_note in ("betboom_unavailable", "betboom_parse_error") and not raw:
+    if fetch_note in (
+        "betboom_unavailable",
+        "betboom_parse_error",
+        "betboom_empty_line",
+    ) and not raw:
         stats.raw_found = 0
         stats.flush(suffix="_BETBOOM_FAIL")
         return [], 0, stats, fetch_note

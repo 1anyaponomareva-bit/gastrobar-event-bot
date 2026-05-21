@@ -59,6 +59,14 @@ _FETCH_NOTE_OK = "betboom_ok"
 _FETCH_NOTE_CACHE = "betboom_cache"
 _FETCH_NOTE_UNAVAILABLE = "betboom_unavailable"
 _FETCH_NOTE_PARSE_ERROR = "betboom_parse_error"
+_FETCH_NOTE_EMPTY = "betboom_empty_line"
+
+# Приоритетные виды спорта (укладываемся в BETBOOM_FETCH_TIMEOUT_SEC)
+PLAYWRIGHT_SPORT_SLUGS: tuple[tuple[str, str], ...] = (
+    ("football", "football"),
+    ("hockey", "ice-hockey"),
+    ("basketball", "basketball"),
+)
 
 
 @dataclass
@@ -152,9 +160,13 @@ def _coerce_event(
     if not title:
         return None
     if not _looks_like_match_title(title) and sport not in ("formula1",):
-        if sport == "formula1" and not re.search(r"practice|qualifying|race|sprint|gp", title, re.I):
-            return None
-        elif sport != "formula1":
+        if home and away:
+            pass
+        elif sport == "formula1" and re.search(
+            r"practice|qualifying|race|sprint|gp", title, re.I
+        ):
+            pass
+        else:
             return None
     if not home and not away:
         title, home, away = _extract_title_teams(title)
@@ -207,7 +219,16 @@ def _event_from_loose_dict(d: dict[str, Any], *, page_sport: str, page_url: str)
     )
     if isinstance(league, dict):
         league = str(league.get("name") or league.get("title") or "")
-    ts = d.get("startTime") or d.get("start_time") or d.get("start") or d.get("kickoff")
+    ts = (
+        d.get("startTime")
+        or d.get("start_time")
+        or d.get("start")
+        or d.get("kickoff")
+        or d.get("startAt")
+        or d.get("start_at")
+        or d.get("dateTime")
+        or d.get("matchTime")
+    )
     date_s = str(d.get("date") or "")[:10]
     time_s = str(d.get("time") or "")
     if ts and not date_s:
@@ -297,6 +318,80 @@ def _in_days_window(e: dict[str, Any], *, days_ahead: int) -> bool:
     return start <= d <= end
 
 
+def _is_line_api_url(url: str) -> bool:
+    u = (url or "").lower()
+    skip = (
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".svg",
+        ".woff",
+        ".css",
+        ".js",
+        "analytics",
+        "google",
+        "yandex",
+        "facebook",
+        "hotjar",
+    )
+    if any(x in u for x in skip):
+        return False
+    if any(
+        x in u
+        for x in (
+            "siteapi",
+            "site_api",
+            "sporthub",
+            "betboom.ru",
+            "betboompass",
+            "ws.betboom",
+        )
+    ):
+        return "/api/" in u or "site_api" in u or "_ws" in u or "socket" in u
+    return False
+
+
+def _ingest_json_payload(
+    data: Any,
+    *,
+    page_sport: str,
+    page_url: str,
+    end_day: date,
+    captured: list[dict[str, Any]],
+) -> int:
+    buf: list[dict[str, Any]] = []
+    _walk_json_for_events(data, page_sport=page_sport, page_url=page_url, out=buf)
+    added = 0
+    for ev in buf:
+        try:
+            d = date.fromisoformat(str(ev.get("date", "")))
+        except ValueError:
+            continue
+        if _today_vn() <= d <= end_day:
+            captured.append(ev)
+            added += 1
+    return added
+
+
+def _ingest_response_body(
+    body: Any,
+    *,
+    url: str,
+    page_sport: str,
+    end_day: date,
+    captured: list[dict[str, Any]],
+) -> int:
+    if isinstance(body, (dict, list)):
+        return _ingest_json_payload(
+            body,
+            page_sport=page_sport,
+            page_url=url,
+            end_day=end_day,
+            captured=captured,
+        )
+    return 0
+
+
 async def _fetch_json_url() -> list[dict[str, Any]]:
     if not BETBOOM_JSON_URL:
         return []
@@ -315,7 +410,7 @@ async def _fetch_json_url() -> list[dict[str, Any]]:
 
 
 def _playwright_fetch_sync(*, days_ahead: int) -> list[dict[str, Any]]:
-    """Sync Playwright: перехват JSON ответов siteapi при открытии страниц линии."""
+    """Playwright: HTTP JSON + WebSocket sporthub/tree_ws (линия BetBoom)."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
@@ -323,10 +418,19 @@ def _playwright_fetch_sync(*, days_ahead: int) -> list[dict[str, Any]]:
 
     captured: list[dict[str, Any]] = []
     end_day = _today_vn() + timedelta(days=max(0, days_ahead - 1))
+    json_urls: list[str] = []
+    ws_frames = 0
+
+    def _sport_for_url(url: str, referer: str = "") -> str:
+        blob = f"{url} {referer}".lower()
+        for sp, slug in PLAYWRIGHT_SPORT_SLUGS:
+            if slug in blob:
+                return sp
+        return "football"
 
     def on_response(response) -> None:
         url = response.url or ""
-        if "siteapi" not in url and "site_api" not in url and "/api/" not in url:
+        if not _is_line_api_url(url):
             return
         try:
             if response.status != 200:
@@ -334,43 +438,89 @@ def _playwright_fetch_sync(*, days_ahead: int) -> list[dict[str, Any]]:
             body = response.json()
         except Exception:
             return
-        page_sport = "football"
-        for sp, slug in SPORT_PAGES:
-            if slug in url or slug in (response.request.headers.get("referer") or ""):
-                page_sport = sp
-                break
-        buf: list[dict[str, Any]] = []
-        _walk_json_for_events(body, page_sport=page_sport, page_url=url, out=buf)
-        for ev in buf:
+        sp = _sport_for_url(url, response.request.headers.get("referer") or "")
+        n = _ingest_response_body(
+            body, url=url, page_sport=sp, end_day=end_day, captured=captured
+        )
+        if n:
+            json_urls.append(url[:160])
+
+    def on_websocket(ws) -> None:
+        nonlocal ws_frames
+
+        def on_frame(frame) -> None:
+            nonlocal ws_frames
+            payload = getattr(frame, "payload", frame)
+            if isinstance(payload, bytes):
+                try:
+                    text = payload.decode("utf-8", errors="ignore")
+                except Exception:
+                    return
+            else:
+                text = str(payload or "")
+            text = text.strip()
+            if not text or text[0] not in "{[":
+                return
             try:
-                d = date.fromisoformat(str(ev.get("date", "")))
-            except ValueError:
-                continue
-            if _today_vn() <= d <= end_day:
-                captured.append(ev)
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                return
+            sp = _sport_for_url(ws.url or "")
+            n = _ingest_json_payload(
+                data,
+                page_sport=sp,
+                page_url=ws.url or "ws",
+                end_day=end_day,
+                captured=captured,
+            )
+            if n:
+                ws_frames += 1
+
+        ws.on("framereceived", on_frame)
+
+    per_page_ms = max(
+        8000,
+        int((BETBOOM_FETCH_TIMEOUT_SEC * 1000 - 3000) / max(len(PLAYWRIGHT_SPORT_SLUGS), 1)),
+    )
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             locale="ru-RU",
             timezone_id=TIMEZONE,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            extra_http_headers={"Accept-Language": "ru-RU,ru;q=0.9"},
         )
         page = context.new_page()
         page.on("response", on_response)
-        for _sp, slug in SPORT_PAGES:
+        page.on("websocket", on_websocket)
+        for _sp, slug in PLAYWRIGHT_SPORT_SLUGS:
+            if len(captured) >= 12:
+                break
             url = f"{BETBOOM_BASE_URL}/sport/{slug}"
             try:
                 page.goto(
                     url,
                     wait_until="domcontentloaded",
-                    timeout=BETBOOM_PAGE_TIMEOUT_MS,
+                    timeout=per_page_ms,
                 )
-                page.wait_for_timeout(800)
+                page.wait_for_timeout(3500)
             except Exception as exc:
                 log.warning("BETBOOM_PARSE_ERROR page=%s: %s", slug, exc)
         browser.close()
-    return _dedupe_raw(captured)
+
+    out = _dedupe_raw(captured)
+    log.info(
+        "BETBOOM_PLAYWRIGHT done raw=%s json_urls=%s ws_frames_with_events=%s sample_urls=%s",
+        len(out),
+        len(json_urls),
+        ws_frames,
+        json_urls[:5],
+    )
+    return out
 
 
 async def _fetch_via_playwright(*, days_ahead: int) -> list[dict[str, Any]]:
@@ -457,9 +607,16 @@ async def _fetch_betboom_line_inner(*, days_ahead: int = 3) -> BetBoomFetchResul
             result.errors = errors
             log.info("BETBOOM_CACHE_USED events=%s", len(filtered))
             return result
-        result.fetch_note = _FETCH_NOTE_UNAVAILABLE if errors else _FETCH_NOTE_PARSE_ERROR
+        if errors:
+            result.fetch_note = _FETCH_NOTE_UNAVAILABLE
+        else:
+            result.fetch_note = _FETCH_NOTE_EMPTY
         result.errors = errors
-        log.warning("BETBOOM_PARSE_ERROR no events errors=%s", errors)
+        log.warning(
+            "BETBOOM_PARSE_ERROR no events note=%s errors=%s",
+            result.fetch_note,
+            errors,
+        )
         return result
 
     filtered = filter_betboom_events(raw)
@@ -478,11 +635,21 @@ async def _fetch_betboom_line_inner(*, days_ahead: int = 3) -> BetBoomFetchResul
 
 
 def is_betboom_failure_note(note: str | None) -> bool:
-    return note in (_FETCH_NOTE_UNAVAILABLE, _FETCH_NOTE_PARSE_ERROR)
+    return note in (
+        _FETCH_NOTE_UNAVAILABLE,
+        _FETCH_NOTE_PARSE_ERROR,
+        _FETCH_NOTE_EMPTY,
+    )
 
 
 def format_betboom_unavailable_message(note: str | None = None) -> str:
-    if note == _FETCH_NOTE_PARSE_ERROR:
+    if note == _FETCH_NOTE_EMPTY:
+        body = (
+            "BetBoom: линия пуста (Playwright не получил матчи по WebSocket/API).\n"
+            "Часто на сервере вне РФ. Показан кэш или резерв API-SPORTS (если включён).\n"
+            "Можно задать BETBOOM_JSON_URL из DevTools → Network."
+        )
+    elif note == _FETCH_NOTE_PARSE_ERROR:
         body = (
             "Источник BetBoom: ошибка парсинга линии.\n"
             "Показан сохранённый кэш (если есть) или попробуйте позже."
@@ -509,8 +676,13 @@ async def merge_betboom_with_api_fallback(
 
     note = bb.fetch_note or _FETCH_NOTE_UNAVAILABLE
 
-    if not BETBOOM_API_FALLBACK:
-        log.info("BETBOOM empty, API-SPORTS fallback disabled (BETBOOM_API_FALLBACK=0)")
+    from config import BETBOOM_EMERGENCY_API_FALLBACK
+
+    if not BETBOOM_API_FALLBACK and not BETBOOM_EMERGENCY_API_FALLBACK:
+        log.info(
+            "BETBOOM empty, API-SPORTS fallback disabled "
+            "(BETBOOM_API_FALLBACK=0, BETBOOM_EMERGENCY_API_FALLBACK=0)"
+        )
         return [], note, bb.raw_found
 
     from api_sports_status import get_last_sport_status, probe_sport
@@ -546,7 +718,11 @@ async def merge_betboom_with_api_fallback(
 
     from sports_events import _merge_raw_safe_72h_events
 
-    log.warning("BETBOOM empty — optional API-SPORTS fallback (days=%s)", days_ahead)
+    log.warning(
+        "BETBOOM empty — API-SPORTS emergency fallback (days=%s note=%s)",
+        days_ahead,
+        note,
+    )
     api = await _merge_raw_safe_72h_events(days_ahead=days_ahead)
     if api.fetch_note in ("api_suspended", "api_rate_limit"):
         log.error("API-SPORTS fallback aborted: %s", api.fetch_note)
