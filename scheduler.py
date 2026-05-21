@@ -26,9 +26,23 @@ TZ = ZoneInfo(TIMEZONE)
 scheduler = AsyncIOScheduler(timezone=TZ)
 
 
+async def _run_daily_job(bot: Bot) -> None:
+    try:
+        await run_scheduled_daily_content(bot)
+    except Exception:
+        log.exception("Scheduler job daily_content_generator failed", exc_info=True)
+
+
+async def _run_weekly_job(bot: Bot) -> None:
+    try:
+        await run_scheduled_weekly_radar(bot)
+    except Exception:
+        log.exception("Scheduler job weekly_radar_auto failed", exc_info=True)
+
+
 def setup_jobs(bot: Bot) -> None:
     scheduler.add_job(
-        run_scheduled_daily_content,
+        _run_daily_job,
         CronTrigger(hour=DAILY_POST_HOUR, minute=0, timezone=TZ),
         args=[bot],
         id="daily_content_generator",
@@ -41,7 +55,7 @@ def setup_jobs(bot: Bot) -> None:
         ADMIN_ID,
     )
     scheduler.add_job(
-        run_scheduled_weekly_radar,
+        _run_weekly_job,
         CronTrigger(
             day_of_week=WEEKLY_RADAR_DOW,
             hour=WEEKLY_RADAR_HOUR,

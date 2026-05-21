@@ -31,13 +31,13 @@ async def run_scheduled_weekly_radar(bot: Bot) -> None:
         if not events:
             await bot.send_message(
                 ADMIN_ID,
-                "📭 На этой неделе в Gastrobar не нашлось крупных эфиров для афиши.\n"
-                "Попробуйте /events → Афиша на неделю позже.",
+                "📭 На ближайшие 3 дня в Gastrobar не нашлось крупных эфиров.\n"
+                "Попробуйте /events → Афиша на 3 дня позже."
             )
             return
 
         body = format_radar_week_message(events)
-        header = "🔭 Event Radar · Авто-афиша на неделю\n\n"
+        header = "🔭 Event Radar · Авто-афиша на 3 дня\n\n"
         if fetch_note:
             from event_radar import radar_fetch_header
 
@@ -50,12 +50,15 @@ async def run_scheduled_weekly_radar(bot: Bot) -> None:
             f"{header}Найдено {selected} событий (watchability).\n\n{body}",
         )
         log.info("scheduled weekly radar delivered: %s events", len(events))
-    except Exception:
-        log.exception("scheduled weekly radar failed")
+    except Exception as exc:
+        log.exception("Scheduler weekly_radar failed", exc_info=True)
         try:
+            from error_handling import format_telegram_exception
+
             await bot.send_message(
                 ADMIN_ID,
-                f"❌ Не удалось собрать weekly Event Radar.\n\n{troubleshoot_footer()}",
+                f"❌ Не удалось собрать weekly Event Radar.\n\n"
+                f"{format_telegram_exception(exc)}\n\n{troubleshoot_footer()}",
             )
         except Exception:
-            log.exception("scheduled weekly radar: failed to notify admin")
+            log.exception("scheduled weekly radar: failed to notify admin", exc_info=True)

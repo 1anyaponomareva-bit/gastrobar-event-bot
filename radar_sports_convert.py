@@ -30,6 +30,7 @@ _SPORT_CATEGORY = {
     "formula1": ("SPORTS", "🏎"),
     "f1": ("SPORTS", "🏎"),
     "esports": ("ESPORTS", "🎮"),
+    "tennis": ("SPORTS", "🎾"),
     "mma": ("SPORTS", "🥊"),
     "boxing": ("SPORTS", "🥊"),
 }
@@ -137,9 +138,10 @@ def lock_football_fixture_event(
     *,
     phase: str = "api_sports",
 ) -> dict[str, Any] | None:
-    """Lock по UTC ISO из API-SPORTS (date/time в item — только для отображения)."""
+    """Lock по timestamp / UTC ISO из API-SPORTS."""
     iso = str(item.get("fixture_utc_iso") or "").strip()
-    if not iso:
+    ts = item.get("fixture_timestamp")
+    if not iso and (ts is None or ts == ""):
         return None
     title_s = str(item.get("title", ""))
     league_s = str(item.get("league", ""))
@@ -163,7 +165,27 @@ def lock_football_fixture_event(
         return None
     from locked_time import lock_event_from_api_utc_iso
 
-    return lock_event_from_api_utc_iso(ev, iso, phase=phase)
+    return lock_event_from_api_utc_iso(ev, iso, phase=phase, timestamp=ts)
+
+
+def lock_betboom_program_item(
+    item: dict[str, Any],
+    *,
+    phase: str = "betboom",
+) -> dict[str, Any] | None:
+    """BetBoom: date/time уже локальные (VN), без UTC conversion."""
+    ev = program_item_to_radar_event(item)
+    if not ev:
+        return None
+    from locked_time import lock_event_from_vn_wall_clock
+
+    out = lock_event_from_vn_wall_clock(ev, phase=phase)
+    if out:
+        out["source"] = "BetBoom"
+        out["verified_via"] = "BetBoom"
+        if item.get("source_url"):
+            out["source_url"] = item["source_url"]
+    return out
 
 
 def lock_api_sports_program_item(
@@ -171,12 +193,14 @@ def lock_api_sports_program_item(
     *,
     phase: str = "api_sports",
 ) -> dict[str, Any] | None:
-    """Football — UTC fixture; остальные виды — lock по локальному date/time."""
-    if str(item.get("fixture_utc_iso") or "").strip():
+    """API-SPORTS: timestamp/UTC ISO; иначе VN wall (без trusted_tz NHL/NY)."""
+    iso = str(item.get("fixture_utc_iso") or "").strip()
+    ts = item.get("fixture_timestamp")
+    if iso or (ts is not None and ts != ""):
         return lock_football_fixture_event(item, phase=phase)
     ev = program_item_to_radar_event(item)
     if not ev:
         return None
-    from locked_time import lock_event_schedule
+    from locked_time import lock_event_from_vn_wall_clock
 
-    return lock_event_schedule(ev, phase=phase)
+    return lock_event_from_vn_wall_clock(ev, phase=phase)

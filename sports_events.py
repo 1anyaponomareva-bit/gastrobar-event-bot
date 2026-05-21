@@ -298,28 +298,59 @@ _BOXING_TOP_NAMES = (
 
 def _parse_dt_to_local(dt_str: str) -> tuple[str, str]:
     """
-    API обычно возвращает ISO datetime в UTC.
+    API обычно возвращает ISO datetime в UTC (или unix через _row_from_api_dt).
     Возвращаем (YYYY-MM-DD, HH:MM) в Asia/Ho_Chi_Minh.
     """
+    from event_datetime_norm import normalize_event_datetime, utc_from_iso, utc_from_timestamp
+
     if not dt_str:
         return "", "00:00"
     s = str(dt_str).strip()
-    # Часто встречается формат с Z
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(s)
-    except ValueError:
-        # Если вернули только дату — считаем 00:00
+    utc_dt = utc_from_timestamp(s) if s.isdigit() else utc_from_iso(s)
+    if utc_dt is None:
         try:
             d = date.fromisoformat(s[:10])
-            dt = datetime.combine(d, dtime(0, 0), tzinfo=TZ)
+            utc_dt = datetime.combine(d, dtime(0, 0), tzinfo=ZoneInfo("UTC"))
         except Exception:
             return "", "00:00"
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-    local = dt.astimezone(TZ)
+    local = utc_dt.astimezone(TZ)
     return local.date().isoformat(), local.strftime("%H:%M")
+
+
+def _row_from_api_dt(
+    *,
+    dt_iso: str = "",
+    timestamp: Any = None,
+    timezone_name: str = "",
+) -> dict[str, str | int | None]:
+    """Поля datetime для raw row: timestamp — source of truth."""
+    from event_datetime_norm import utc_from_iso, utc_from_timestamp
+
+    utc_dt = None
+    if timestamp is not None and timestamp != "":
+        utc_dt = utc_from_timestamp(timestamp)
+    if utc_dt is None and dt_iso:
+        utc_dt = utc_from_iso(str(dt_iso))
+    out: dict[str, str | int | None] = {
+        "fixture_utc_iso": str(dt_iso) if dt_iso else "",
+        "fixture_timestamp": None,
+        "api_timezone": str(timezone_name or "").strip() or None,
+    }
+    if utc_dt is not None:
+        local = utc_dt.astimezone(TZ)
+        out["date"] = local.date().isoformat()
+        out["time"] = local.strftime("%H:%M")
+        out["fixture_utc_iso"] = utc_dt.isoformat()
+        if timestamp is not None and timestamp != "":
+            try:
+                out["fixture_timestamp"] = int(timestamp)
+            except (TypeError, ValueError):
+                pass
+    elif dt_iso:
+        d_str, t_str = _parse_dt_to_local(dt_iso)
+        out["date"] = d_str
+        out["time"] = t_str
+    return out
 
 
 def _clean_league_name(league: str) -> str:
@@ -615,6 +646,8 @@ def _match_item_from_football(e: dict[str, Any], tier: str) -> dict[str, Any]:
     iso = str(e.get("fixture_utc_iso") or "").strip()
     if iso:
         item["fixture_utc_iso"] = iso
+    if e.get("fixture_timestamp") is not None:
+        item["fixture_timestamp"] = e.get("fixture_timestamp")
     return item
 
 
@@ -815,6 +848,54 @@ _WORLD_HOCKEY_NATIONS = (
     "denmark",
     "france",
     "austria",
+    "great britain",
+    "united kingdom",
+    "uk",
+    "poland",
+    "hungary",
+    "kazakhstan",
+)
+
+_HOCKEY_KHL_RE = re.compile(
+    r"\b(khl\b|kontinental\s+hockey|ак\s+барс|lokomotiv\s+yaroslavl)\b",
+    re.I,
+)
+_HOCKEY_NHL_RE = re.compile(
+    r"\b(nhl\b|national\s+hockey\s+league|stanley\s+cup)\b",
+    re.I,
+)
+_HOCKEY_WORLD_RE = re.compile(
+    r"\b(world\s+championship|iihf|world\s+cup.*hockey|championship.*hockey)\b",
+    re.I,
+)
+
+_TENNIS_TIER_RE = re.compile(
+    r"\b(atp\s*500|wta\s*500|atp\s*1000|wta\s*1000|masters\s+1000|"
+    r"roland\s+garros|wimbledon|us\s+open|australian\s+open|indian\s+wells|"
+    r"miami\s+open|monte\s+carlo|madrid\s+open|rome|hamburg|cincinnati|shanghai)\b",
+    re.I,
+)
+_TENNIS_KNOWN_PLAYERS = (
+    "djokovic",
+    "nadal",
+    "federer",
+    "alcaraz",
+    "sinner",
+    "medvedev",
+    "zverev",
+    "rublev",
+    "tsitsipas",
+    "ruud",
+    "fritz",
+    "paul",
+    "altmaier",
+    "shelton",
+    "tiafoe",
+    "pegula",
+    "sabalenka",
+    "swiatek",
+    "gauff",
+    "rybakina",
 )
 
 
@@ -841,14 +922,36 @@ def _has_matchup_title(title: str) -> bool:
     )
 
 
+def classify_hockey_bucket(e: dict[str, Any]) -> str:
+    """khl | nhl | world_hockey | hockey (generic)."""
+    if str(e.get("sport", "")).lower() != "hockey":
+        return ""
+    blob = _event_blob(e)
+    if _HOCKEY_KHL_RE.search(blob):
+        return "khl"
+    if _HOCKEY_NHL_RE.search(blob):
+        return "nhl"
+    if _HOCKEY_WORLD_RE.search(blob) or _is_world_championship_hockey(e):
+        return "world_hockey"
+    return "hockey"
+
+
 def _log_found_breakdown(merged: list[dict[str, Any]], *, label: str) -> None:
-    fb = hk = nba = f1 = esp = mma = other = 0
+    fb = hk = nba = f1 = esp = mma = tennis = other = 0
+    khl = nhl = world_hk = 0
     for row in merged:
         sp = str(row.get("sport", "")).lower()
         if sp == "football":
             fb += 1
         elif sp == "hockey":
             hk += 1
+            bucket = classify_hockey_bucket(row)
+            if bucket == "khl":
+                khl += 1
+            elif bucket == "nhl":
+                nhl += 1
+            elif bucket == "world_hockey":
+                world_hk += 1
         elif sp == "basketball":
             nba += 1
         elif sp in ("formula1", "f1"):
@@ -857,18 +960,25 @@ def _log_found_breakdown(merged: list[dict[str, Any]], *, label: str) -> None:
             esp += 1
         elif sp in ("mma", "boxing"):
             mma += 1
+        elif sp == "tennis":
+            tennis += 1
         else:
             other += 1
     log.info(
-        "%s FOUND_TOTAL=%s FOOTBALL_FOUND=%s HOCKEY_FOUND=%s ESPORTS_FOUND=%s "
-        "F1_FOUND=%s NBA_FOUND=%s MMA_BOXING_FOUND=%s OTHER=%s",
+        "%s RADAR_RAW_TOTAL=%s FOOTBALL_FOUND=%s HOCKEY_FOUND=%s KHL_FOUND=%s "
+        "NHL_FOUND=%s WORLD_HOCKEY_FOUND=%s ESPORTS_FOUND=%s F1_FOUND=%s "
+        "NBA_FOUND=%s TENNIS_FOUND=%s MMA_BOXING_FOUND=%s OTHER=%s",
         label,
         len(merged),
         fb,
         hk,
+        khl,
+        nhl,
+        world_hk,
         esp,
         f1,
         nba,
+        tennis,
         mma,
         other,
     )
@@ -1004,20 +1114,27 @@ def is_gastrobar_api_sport_worthy(e: dict[str, Any]) -> bool:
     if sport == "hockey":
         if not _has_matchup_title(title):
             return False
-        if _is_world_championship_hockey(e):
+        blob = _event_blob(e)
+        if _HOCKEY_WORLD_RE.search(blob) or _is_world_championship_hockey(e):
             return True
-        if (
-            "nhl" in league
-            or "stanley" in league
-            or "khl" in league
-            or "playoff" in league
-        ):
+        if _HOCKEY_KHL_RE.search(blob):
             return True
-        if "world championship" in league or "iihf" in league:
+        if _HOCKEY_NHL_RE.search(blob):
+            return True
+        if re.search(r"\bplayoff|play-off|finals?\b", blob, re.I):
             return True
         tl = title.lower()
-        nations = sum(1 for n in _WORLD_HOCKEY_NATIONS if n in tl)
+        nations = sum(1 for n in _WORLD_HOCKEY_NATIONS if n in tl or n in blob)
         return nations >= 2
+
+    if sport == "tennis":
+        if not _has_matchup_title(title):
+            return False
+        blob = _event_blob(e)
+        if _TENNIS_TIER_RE.search(blob):
+            return True
+        stars = sum(1 for p in _TENNIS_KNOWN_PLAYERS if p in blob)
+        return stars >= 1
 
     if sport == "basketball":
         if "nba" not in blob:
@@ -1074,6 +1191,7 @@ def raw_event_to_radar_program_item(e: dict[str, Any]) -> dict[str, Any]:
         "basketball": "🏀",
         "formula1": "🏎",
         "esports": "🎮",
+        "tennis": "🎾",
         "mma": "🥊",
         "boxing": "🥊",
     }
@@ -1091,6 +1209,10 @@ def raw_event_to_radar_program_item(e: dict[str, Any]) -> dict[str, Any]:
     iso = str(e.get("fixture_utc_iso") or "").strip()
     if iso:
         item["fixture_utc_iso"] = iso
+    if e.get("fixture_timestamp") is not None:
+        item["fixture_timestamp"] = e.get("fixture_timestamp")
+    if e.get("api_timezone"):
+        item["api_timezone"] = e.get("api_timezone")
     if e.get("league_id") is not None:
         item["league_id"] = e.get("league_id")
     if e.get("league_country"):
@@ -1214,23 +1336,60 @@ def build_weekly_program_with_stats(
     return program, raw_total, len(program)
 
 
+def _reraise_api_sports(e: BaseException) -> None:
+    from api_sports_status import ApiSportsError
+
+    if isinstance(e, ApiSportsError):
+        raise e
+
+
+async def _collect_days_sequential(
+    one_day,
+    *,
+    days_ahead: int,
+    sport_label: str,
+) -> list[dict[str, Any]]:
+    """По одному дню за раз (без parallel burst). Throttle в _get_json."""
+    start = _today()
+    n_days = max(1, days_ahead)
+    events: list[dict[str, Any]] = []
+    for i in range(n_days):
+        d = start + timedelta(days=i)
+        try:
+            day_events = await one_day(d)
+            if day_events:
+                events.extend(day_events)
+        except Exception as e:
+            _reraise_api_sports(e)
+            log.error("%s API day %s failed: %s", sport_label, d.isoformat(), e)
+    return events
+
+
 async def _get_json(url: str, *, headers: dict[str, str], timeout: float = 15.0) -> dict[str, Any]:
+    from api_sports_status import ApiSportsError, classify_errors_payload
+    from api_sports_throttle import throttle_before_request
+
+    await throttle_before_request()
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.get(url, headers=headers)
+    if r.status_code == 429:
+        raise ApiSportsError("rateLimit", f"HTTP 429: {r.text[:200]}", sport="")
     if r.status_code != 200:
-        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+        raise ApiSportsError("unavailable", f"HTTP {r.status_code}: {r.text[:300]}", sport="")
     data = r.json()
     if not isinstance(data, dict):
         raise RuntimeError("Unexpected JSON payload")
     errs = data.get("errors") or {}
-    # Квота/ключ часто приходят как HTTP 200 + errors + response: []
-    if errs:
+    health, detail = classify_errors_payload(errs)
+    if health != "ok":
         log.warning(
-            "API-SPORTS errors for %s: %s (results=%s)",
+            "API-SPORTS errors for %s: health=%s detail=%s results=%s",
             url,
-            errs,
+            health,
+            detail,
             data.get("results"),
         )
+        raise ApiSportsError(health, detail or str(errs), sport="")
     return data
 
 
@@ -1254,6 +1413,7 @@ async def get_football_events_next_days_vn(*, days_ahead: int = 2) -> list[dict[
         try:
             data = await _get_json(url, headers=headers)
         except Exception as e:
+            _reraise_api_sports(e)
             log.error("Football day failed (%s): %s", d.isoformat(), e)
             return []
 
@@ -1275,42 +1435,47 @@ async def get_football_events_next_days_vn(*, days_ahead: int = 2) -> list[dict[
             round_name = league.get("round") or ""
             league_full = league_name + (f" ({round_name})" if round_name else "")
             title = f"{home} vs {away}".strip(" vs").strip()
-            dt_iso = fixture.get("date") or ""
-            d_str, t_str = _parse_dt_to_local(dt_iso)
-            if not d_str:
+            dt_iso = str(fixture.get("date") or "")
+            dt_fields = _row_from_api_dt(
+                dt_iso=dt_iso,
+                timestamp=fixture.get("timestamp"),
+                timezone_name=str(fixture.get("timezone") or ""),
+            )
+            if not dt_fields.get("date"):
                 continue
             day_events.append(
                 {
                     "sport": "football",
                     "title": title or "Match",
                     "league": league_full or league_name or "Football",
+                    "home": home,
+                    "away": away,
                     "league_id": league_id,
                     "league_country": league_country,
-                    "date": d_str,
-                    "time": t_str,
-                    "fixture_utc_iso": str(dt_iso),
+                    "date": dt_fields["date"],
+                    "time": dt_fields["time"],
+                    "fixture_utc_iso": dt_fields.get("fixture_utc_iso") or dt_iso,
+                    "fixture_timestamp": dt_fields.get("fixture_timestamp"),
+                    "api_timezone": dt_fields.get("api_timezone"),
                     "importance": "low",
                     "source": "API-SPORTS",
                 }
             )
         return day_events
 
-    chunks = await asyncio.gather(
-        *[one_day(d) for d in dates],
-        return_exceptions=True,
-    )
     events: list[dict[str, Any]] = []
-    for ch in chunks:
-        if isinstance(ch, Exception):
-            log.error("Football now24 day failed: %s", ch)
-            continue
-        events.extend(ch)
+    for d in dates:
+        try:
+            events.extend(await one_day(d))
+        except Exception as e:
+            _reraise_api_sports(e)
+            log.error("Football now24 day failed (%s): %s", d.isoformat(), e)
     return events
 
 
-async def get_football_events() -> list[dict[str, Any]]:
+async def get_football_events(*, days_ahead: int = 3) -> list[dict[str, Any]]:
     """
-    Football API-SPORTS: события на ближайшие 7 дней.
+    Football API-SPORTS: события на ближайшие days_ahead дней (SAFE_MODE, sequential).
     """
     if not SPORTS_API_KEY:
         return []
@@ -1325,6 +1490,7 @@ async def get_football_events() -> list[dict[str, Any]]:
         try:
             data = await _get_json(url, headers=headers)
         except Exception as e:
+            _reraise_api_sports(e)
             log.error("Football day failed (%s): %s", d.isoformat(), e)
             return []
 
@@ -1346,43 +1512,42 @@ async def get_football_events() -> list[dict[str, Any]]:
             round_name = league.get("round") or ""
             league_full = league_name + (f" ({round_name})" if round_name else "")
             title = f"{home} vs {away}".strip(" vs").strip()
-            dt_iso = fixture.get("date") or ""
-            d_str, t_str = _parse_dt_to_local(dt_iso)
-            if not d_str:
+            dt_iso = str(fixture.get("date") or "")
+            dt_fields = _row_from_api_dt(
+                dt_iso=dt_iso,
+                timestamp=fixture.get("timestamp"),
+                timezone_name=str(fixture.get("timezone") or ""),
+            )
+            if not dt_fields.get("date"):
                 continue
             day_events.append(
                 {
                     "sport": "football",
                     "title": title or "Match",
                     "league": league_full or league_name or "Football",
+                    "home": home,
+                    "away": away,
                     "league_id": league_id,
                     "league_country": league_country,
-                    "date": d_str,
-                    "time": t_str,
-                    "fixture_utc_iso": str(dt_iso),
+                    "date": dt_fields["date"],
+                    "time": dt_fields["time"],
+                    "fixture_utc_iso": dt_fields.get("fixture_utc_iso") or dt_iso,
+                    "fixture_timestamp": dt_fields.get("fixture_timestamp"),
+                    "api_timezone": dt_fields.get("api_timezone"),
                     "importance": "low",
                     "source": "API-SPORTS",
                 }
             )
         return day_events
 
-    # Free plan: from/to недоступен — запрашиваем по date=; дни параллельно, чтобы /week не «висел» минутами.
-    chunks = await asyncio.gather(
-        *[one_day(start + timedelta(days=i)) for i in range(7)],
-        return_exceptions=True,
+    return await _collect_days_sequential(
+        one_day, days_ahead=days_ahead, sport_label="football"
     )
-    events: list[dict[str, Any]] = []
-    for ch in chunks:
-        if isinstance(ch, Exception):
-            log.error("Football parallel day failed: %s", ch)
-            continue
-        events.extend(ch)
-    return events
 
 
-async def get_basketball_events() -> list[dict[str, Any]]:
+async def get_basketball_events(*, days_ahead: int = 3) -> list[dict[str, Any]]:
     """
-    Basketball API-SPORTS: события на ближайшие 7 дней.
+    Basketball API-SPORTS: события на ближайшие days_ahead дней (VN календарь).
     """
     if not SPORTS_API_KEY:
         return []
@@ -1398,6 +1563,7 @@ async def get_basketball_events() -> list[dict[str, Any]]:
             data = await _get_json(url, headers=headers)
             resp = data.get("response") or []
         except Exception as e:
+            _reraise_api_sports(e)
             log.error("Basketball API day failed (%s): %s", d, e)
             return []
 
@@ -1414,40 +1580,39 @@ async def get_basketball_events() -> list[dict[str, Any]]:
             round_name = league.get("round") or ""
             league_full = league_name + (f" ({round_name})" if round_name else "")
             title = f"{home} vs {away}".strip(" vs").strip()
-            dt_iso = item.get("date") or item.get("time") or ""
-            d_str, t_str = _parse_dt_to_local(dt_iso)
-            if not d_str:
+            dt_iso = str(item.get("date") or item.get("time") or "")
+            dt_fields = _row_from_api_dt(
+                dt_iso=dt_iso,
+                timestamp=item.get("timestamp"),
+                timezone_name=str(item.get("timezone") or ""),
+            )
+            if not dt_fields.get("date"):
                 continue
             row: dict[str, Any] = {
                 "sport": "basketball",
                 "title": title or "Game",
                 "league": league_full or "Basketball",
-                "date": d_str,
-                "time": t_str,
+                "home": home,
+                "away": away,
+                "date": dt_fields["date"],
+                "time": dt_fields["time"],
+                "fixture_utc_iso": dt_fields.get("fixture_utc_iso") or dt_iso,
+                "fixture_timestamp": dt_fields.get("fixture_timestamp"),
+                "api_timezone": dt_fields.get("api_timezone"),
                 "importance": "low",
                 "source": "API-SPORTS",
             }
-            if dt_iso:
-                row["fixture_utc_iso"] = str(dt_iso)
             day_events.append(row)
         return day_events
 
-    chunks = await asyncio.gather(
-        *[one_day(start + timedelta(days=i)) for i in range(7)],
-        return_exceptions=True,
+    return await _collect_days_sequential(
+        one_day, days_ahead=days_ahead, sport_label="basketball"
     )
-    events: list[dict[str, Any]] = []
-    for ch in chunks:
-        if isinstance(ch, Exception):
-            log.error("Basketball parallel day failed: %s", ch)
-            continue
-        events.extend(ch)
-    return events
 
 
-async def get_hockey_events() -> list[dict[str, Any]]:
+async def get_hockey_events(*, days_ahead: int = 3) -> list[dict[str, Any]]:
     """
-    Hockey API-SPORTS: события на ближайшие 7 дней.
+    Hockey API-SPORTS: события на ближайшие days_ahead дней (VN календарь).
     """
     if not SPORTS_API_KEY:
         return []
@@ -1463,6 +1628,7 @@ async def get_hockey_events() -> list[dict[str, Any]]:
             data = await _get_json(url, headers=headers)
             resp = data.get("response") or []
         except Exception as e:
+            _reraise_api_sports(e)
             log.error("Hockey API day failed (%s): %s", d, e)
             return []
 
@@ -1479,38 +1645,37 @@ async def get_hockey_events() -> list[dict[str, Any]]:
             round_name = league.get("round") or ""
             league_full = league_name + (f" ({round_name})" if round_name else "")
             title = f"{home} vs {away}".strip(" vs").strip()
-            dt_iso = item.get("date") or item.get("time") or ""
-            d_str, t_str = _parse_dt_to_local(dt_iso)
-            if not d_str:
+            dt_iso = str(item.get("date") or item.get("time") or "")
+            dt_fields = _row_from_api_dt(
+                dt_iso=dt_iso,
+                timestamp=item.get("timestamp"),
+                timezone_name=str(item.get("timezone") or ""),
+            )
+            if not dt_fields.get("date"):
                 continue
             row = {
                 "sport": "hockey",
                 "title": title or "Game",
                 "league": league_full or "Hockey",
-                "date": d_str,
-                "time": t_str,
+                "home": home,
+                "away": away,
+                "date": dt_fields["date"],
+                "time": dt_fields["time"],
+                "fixture_utc_iso": dt_fields.get("fixture_utc_iso") or dt_iso,
+                "fixture_timestamp": dt_fields.get("fixture_timestamp"),
+                "api_timezone": dt_fields.get("api_timezone"),
                 "importance": "low",
                 "source": "API-SPORTS",
             }
-            if dt_iso:
-                row["fixture_utc_iso"] = str(dt_iso)
             day_events.append(row)
         return day_events
 
-    chunks = await asyncio.gather(
-        *[one_day(start + timedelta(days=i)) for i in range(7)],
-        return_exceptions=True,
+    return await _collect_days_sequential(
+        one_day, days_ahead=days_ahead, sport_label="hockey"
     )
-    events: list[dict[str, Any]] = []
-    for ch in chunks:
-        if isinstance(ch, Exception):
-            log.error("Hockey parallel day failed: %s", ch)
-            continue
-        events.extend(ch)
-    return events
 
 
-async def get_esports_events() -> list[dict[str, Any]]:
+async def get_esports_events(*, days_ahead: int = 3) -> list[dict[str, Any]]:
     """
     Esports API-SPORTS (v1.esports) — если включено в подписку.
     Нет ключа/плана → дни тихо возвращают [].
@@ -1521,8 +1686,12 @@ async def get_esports_events() -> list[dict[str, Any]]:
     start = _today()
     headers = {"x-apisports-key": SPORTS_API_KEY}
     base = "https://v1.esports.api-sports.io"
+    source_dead = False
 
     async def one_day(d: date) -> list[dict[str, Any]]:
+        nonlocal source_dead
+        if source_dead:
+            return []
         collected: list[dict[str, Any]] = []
         for path in (
             f"/games?date={d.isoformat()}",
@@ -1533,6 +1702,12 @@ async def get_esports_events() -> list[dict[str, Any]]:
             try:
                 data = await _get_json(url, headers=headers)
             except Exception as e:
+                _reraise_api_sports(e)
+                err = str(e).lower()
+                if "service not known" in err or "getaddrinfo" in err or "name or service" in err:
+                    log.warning("ESPORTS_SOURCE_UNAVAILABLE: %s", e)
+                    source_dead = True
+                    return []
                 log.info("Esports path failed (%s): %s", path, e)
                 continue
             resp = data.get("response") or []
@@ -1591,6 +1766,91 @@ async def get_esports_events() -> list[dict[str, Any]]:
         log.info("Esports resolved on %s: %s items", d.isoformat(), len(collected))
         return collected
 
+    return await _collect_days_sequential(
+        one_day, days_ahead=days_ahead, sport_label="esports"
+    )
+
+
+async def get_tennis_events() -> list[dict[str, Any]]:
+    """Tennis API-SPORTS: ATP/WTA 500+ и матчи с известными игроками."""
+    if not SPORTS_API_KEY:
+        return []
+
+    start = _today()
+    headers = {"x-apisports-key": SPORTS_API_KEY}
+    base = "https://v1.tennis.api-sports.io"
+
+    async def one_day(d: date) -> list[dict[str, Any]]:
+        url = f"{base}/fixtures?date={d.isoformat()}"
+        log.info("Tennis endpoint: %s", url)
+        try:
+            data = await _get_json(url, headers=headers)
+        except Exception as e:
+            log.info("Tennis API day failed (%s): %s", d, e)
+            return []
+        resp = data.get("response") or []
+        if not isinstance(resp, list):
+            return []
+        day_events: list[dict[str, Any]] = []
+        for item in resp:
+            if not isinstance(item, dict):
+                continue
+            fixture = item.get("fixture") or item
+            tournament = item.get("tournament") or item.get("competition") or {}
+            t_name = (
+                tournament.get("name") if isinstance(tournament, dict) else str(tournament or "")
+            )
+            players = item.get("players") or item.get("opponents") or []
+            p1 = p2 = ""
+            if isinstance(players, list) and len(players) >= 2:
+                for side in players[:2]:
+                    if isinstance(side, dict):
+                        pl = side.get("player") or side
+                        nm = pl.get("name") if isinstance(pl, dict) else str(pl or "")
+                        if not p1:
+                            p1 = str(nm or "")
+                        else:
+                            p2 = str(nm or "")
+            elif isinstance(players, dict):
+                for key in ("home", "away", "player1", "player2"):
+                    pl = players.get(key)
+                    if isinstance(pl, dict):
+                        nm = str(pl.get("name") or "")
+                    else:
+                        nm = str(pl or "")
+                    if nm and not p1:
+                        p1 = nm
+                    elif nm:
+                        p2 = nm
+            title = f"{p1} — {p2}".strip(" —") if p1 and p2 else str(item.get("name") or "").strip()
+            if not title or title == "—":
+                continue
+            league_full = str(t_name or "Tennis")
+            dt_iso = (
+                (fixture.get("date") if isinstance(fixture, dict) else None)
+                or item.get("date")
+                or ""
+            )
+            d_str, t_str = _parse_dt_to_local(str(dt_iso))
+            if not d_str:
+                continue
+            row = {
+                "sport": "tennis",
+                "title": title,
+                "league": league_full,
+                "date": d_str,
+                "time": t_str,
+                "importance": "medium",
+                "source": "API-SPORTS",
+            }
+            if dt_iso:
+                row["fixture_utc_iso"] = str(dt_iso)
+            if not is_gastrobar_api_sport_worthy(row):
+                continue
+            day_events.append(row)
+        log.info("Tennis fixtures on %s: %s worthy", d.isoformat(), len(day_events))
+        return day_events
+
     chunks = await asyncio.gather(
         *[one_day(start + timedelta(days=i)) for i in range(7)],
         return_exceptions=True,
@@ -1598,13 +1858,13 @@ async def get_esports_events() -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for ch in chunks:
         if isinstance(ch, Exception):
-            log.error("Esports parallel day failed: %s", ch)
+            log.error("Tennis parallel day failed: %s", ch)
             continue
         events.extend(ch)
     return events
 
 
-async def get_formula_events() -> list[dict[str, Any]]:
+async def get_formula_events(*, days_ahead: int = 3) -> list[dict[str, Any]]:
     """
     Formula 1 API-SPORTS: ближайшие гонки/мероприятия.
     Free plan: используем только races?date=YYYY-MM-DD.
@@ -1622,6 +1882,7 @@ async def get_formula_events() -> list[dict[str, Any]]:
         try:
             data = await _get_json(url, headers=headers)
         except Exception as e:
+            _reraise_api_sports(e)
             log.error("Formula1 day failed (%s): %s", d.isoformat(), e)
             return []
 
@@ -1643,46 +1904,115 @@ async def get_formula_events() -> list[dict[str, Any]]:
             day_events.extend(expanded)
         return day_events
 
-    chunks = await asyncio.gather(
-        *[one_day(start + timedelta(days=i)) for i in range(7)],
-        return_exceptions=True,
+    return await _collect_days_sequential(
+        one_day, days_ahead=days_ahead, sport_label="formula1"
     )
-    events: list[dict[str, Any]] = []
-    for ch in chunks:
-        if isinstance(ch, Exception):
-            log.error("Formula1 parallel day failed: %s", ch)
-            continue
-        events.extend(ch)
-    return events
 
 
-async def _merge_raw_week_events() -> list[dict[str, Any]]:
-    """Все события с API за неделю до фильтра важности."""
+async def _merge_raw_safe_72h_events(*, days_ahead: int = 3) -> "ApiCollectResult":
+    """
+    SAFE_MODE: sequential sports, throttle 1.5s, stop on suspended.
+    days_ahead: NOW24=2, NEXT72=3.
+    """
+    from api_sports_status import (
+        ApiCollectResult,
+        ApiSportsError,
+        _RunState,
+        fetch_note_from_health,
+    )
+
     if not SPORTS_API_KEY:
-        log.warning(
-            "SPORTS_API_KEY не задан — для /week используются демо-события (заглушка). "
-            "Добавьте ключ в .env для реальных данных API-SPORTS."
-        )
-        return _stub_raw_events()
+        from api_sports_status import API_NOTE_NO_KEY
 
-    results = await asyncio.gather(
-        get_football_events(),
-        get_basketball_events(),
-        get_hockey_events(),
-        get_formula_events(),
-        get_esports_events(),
-        return_exceptions=True,
+        log.warning("SPORTS_API_KEY не задан — SAFE_MODE stub.")
+        return ApiCollectResult(
+            [],
+            fetch_note=API_NOTE_NO_KEY,
+            sport_status={},
+        )
+
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Asia/Ho_Chi_Minh")
+    today = datetime.now(tz).date()
+    end_day = today + timedelta(days=max(0, days_ahead - 1))
+    log.info(
+        "SAFE_MODE API fetch: %s days (%s .. %s), sequential, throttle 1.5s",
+        days_ahead,
+        today.isoformat(),
+        end_day.isoformat(),
     )
 
+    state = _RunState()
+    sport_fetches: tuple[tuple[str, Any], ...] = (
+        ("football", get_football_events_next_days_vn(days_ahead=days_ahead)),
+        ("hockey", get_hockey_events(days_ahead=days_ahead)),
+        ("basketball", get_basketball_events(days_ahead=days_ahead)),
+        ("formula1", get_formula_events(days_ahead=days_ahead)),
+        ("esports", get_esports_events(days_ahead=days_ahead)),
+    )
     merged: list[dict[str, Any]] = []
-    labels = ("football", "basketball", "hockey", "formula1", "esports")
-    for i, r in enumerate(results):
-        if isinstance(r, Exception):
-            log.error("get_week_events sport=%s failed: %s", labels[i], r)
+    for label, coro in sport_fetches:
+        if state.abort:
+            state.sport_status.setdefault(label, "skipped_suspended")
             continue
-        merged.extend(r)
-    _log_found_breakdown(merged, label="RADAR_MERGE_AFTER_FETCH")
-    return merged
+        try:
+            rows = await coro
+            state.record(label, "ok")
+            log.info("SAFE_MODE %s: %s events", label, len(rows))
+            merged.extend(rows)
+        except ApiSportsError as e:
+            state.record(label, e.health, e.detail)
+            if e.health == "suspended":
+                break
+            if e.health == "rateLimit":
+                break
+        except Exception as e:
+            err = str(e).lower()
+            if label == "esports" and (
+                "service not known" in err or "getaddrinfo" in err
+            ):
+                state.record(label, "unavailable", "ESPORTS_SOURCE_UNAVAILABLE")
+            else:
+                state.record(label, "unavailable", str(e)[:120])
+                log.error("SAFE_MODE %s failed: %s", label, e)
+
+    global _last_api_collect_note
+    _last_api_collect_note = state.finalize_note()
+    from api_sports_status import set_last_sport_status
+
+    set_last_sport_status(state.sport_status)
+
+    _log_found_breakdown(merged, label="SAFE_MODE")
+    log.info(
+        "SAFE_MODE raw total: %s fetch_note=%s sports=%s",
+        len(merged),
+        _last_api_collect_note,
+        state.sport_status,
+    )
+    return ApiCollectResult(
+        merged,
+        fetch_note=_last_api_collect_note,
+        sport_status=state.sport_status,
+        abort_reason=state.abort_reason,
+    )
+
+
+_last_api_collect_note: str | None = None
+
+
+def get_last_api_collect_note() -> str | None:
+    return _last_api_collect_note
+
+
+async def _merge_raw_now24_events() -> "ApiCollectResult":
+    """NOW24 API: только today + tomorrow."""
+    return await _merge_raw_safe_72h_events(days_ahead=2)
+
+
+async def _merge_raw_week_events() -> "ApiCollectResult":
+    """NEXT72 API: максимум 3 дня."""
+    return await _merge_raw_safe_72h_events(days_ahead=3)
 
 
 async def get_week_events_with_stats() -> tuple[list[dict[str, Any]], int, int]:

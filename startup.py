@@ -30,8 +30,10 @@ from config import (
 from database import init_db
 from fatal_conflict_dispatcher import FatalConflictDispatcher
 from gemini_client import effective_gemini_model
+from error_handling import configure_logging
 from scheduler import setup_jobs, shutdown_scheduler, start_scheduler
 
+configure_logging()
 log = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent

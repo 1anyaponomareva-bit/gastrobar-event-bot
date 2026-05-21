@@ -5,3 +5,5 @@ aiosqlite
 apscheduler
 httpx
 psutil
+beautifulsoup4
+playwright

@@ -218,23 +218,13 @@ def _emoji_for_category(cat: str) -> str:
 
 
 def emoji_for_event(e: dict[str, Any]) -> str:
-    """Эмодзи по смыслу события (title/subtitle), не только category от Gemini."""
+    """Эмодзи по виду спорта (rule-based), не по category от Gemini."""
+    from radar_rules import detect_sport, emoji_for_sport
+
     b = bar_event_blob(e)
-    if re.search(r"formula\s*1|\bf1\b|grand\s+prix", b):
-        return "🏎"
     if "eurovision" in b:
         return "🎤"
-    if re.search(r"\bufc\b|\bmma\b|boxing", b):
-        return "🥊"
-    if re.search(r"\bnba\b|basketball", b):
-        return "🏀"
-    if re.search(r"\bnhl\b|hockey|stanley\s+cup", b):
-        return "🏒"
-    if re.search(r"champions\s+league|uefa|premier\s+league|\bucl\b", b):
-        return "⚽"
-    if re.search(r"esports|dota|valorant|cs2|lol worlds", b):
-        return "🎮"
-    return _emoji_for_category(str(e.get("category", "")))
+    return emoji_for_sport(detect_sport(e), e)
 
 
 def _normalize_hhmm(t: str) -> str | None:

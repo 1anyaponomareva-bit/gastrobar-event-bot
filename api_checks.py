@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -64,17 +64,21 @@ async def check_sports_api() -> CheckResult:
         log.warning("API-SPORTS error: %s", msg)
         return CheckResult(name="API-SPORTS", ok=False, details=msg)
 
-    date_vn = datetime.now(ZoneInfo(TIMEZONE)).date().isoformat()
-    urls = (
-        "https://v3.football.api-sports.io/fixtures?next=1",
+    today = datetime.now(ZoneInfo(TIMEZONE)).date()
+    date_vn = today.isoformat()
+    tomorrow = (today + timedelta(days=1)).isoformat()
+    # Free plan: только date= (параметр next= недоступен).
+    probe_urls = (
         f"https://v3.football.api-sports.io/fixtures?date={date_vn}",
+        f"https://v3.football.api-sports.io/fixtures?date={tomorrow}",
+        f"https://v1.hockey.api-sports.io/games?date={date_vn}",
     )
     headers = {"x-apisports-key": SPORTS_API_KEY}
 
     try:
         last_fail: str | None = None
         async with httpx.AsyncClient(timeout=10.0) as client:
-            for url in urls:
+            for url in probe_urls:
                 r = await client.get(url, headers=headers)
                 if r.status_code != 200:
                     last_fail = f"HTTP {r.status_code}: {r.text[:300]}"
@@ -85,12 +89,16 @@ async def check_sports_api() -> CheckResult:
                 api_errors = data.get("errors")
                 if api_errors:
                     err_msg = str(api_errors)[:400]
+                    err_low = err_msg.lower()
+                    if "next parameter" in err_low:
+                        log.info(
+                            "API-SPORTS skip unsupported next= on free plan (%s)",
+                            url,
+                        )
+                        continue
                     log.error("API-SPORTS errors payload: %s", err_msg)
-                    return CheckResult(
-                        name="API-SPORTS",
-                        ok=False,
-                        details=f"errors из ответа API: {err_msg}",
-                    )
+                    last_fail = f"errors из ответа API: {err_msg}"
+                    continue
 
                 resp = data.get("response") or []
                 results_hint = data.get("results")
@@ -102,26 +110,45 @@ async def check_sports_api() -> CheckResult:
                     continue
 
                 if not resp:
-                    extra = f"results={results_hint} paging={paging_info}"
-                    last_fail = f"пустой response. {extra} url={url}"
-                    log.warning("API-SPORTS: %s", last_fail)
-                    continue
+                    # Ключ и эндпоинт рабочие, матчей на день может не быть.
+                    log.info(
+                        "API-SPORTS connected (empty day) url=%s results=%s",
+                        url,
+                        results_hint,
+                    )
+                    return CheckResult(
+                        name="API-SPORTS",
+                        ok=True,
+                        details=(
+                            f"connected (Free plan, date=)\n"
+                            f"0 fixtures on {date_vn}\n{url}"
+                        ),
+                    )
 
                 item = resp[0] or {}
-                league = (item.get("league") or {}).get("name") or "Unknown league"
-                teams = item.get("teams") or {}
-                home = (teams.get("home") or {}).get("name") or "Home"
-                away = (teams.get("away") or {}).get("name") or "Away"
-                fixture = item.get("fixture") or {}
-                dt = fixture.get("date") or ""
+                if "hockey" in url:
+                    league = (item.get("league") or {}).get("name") or "Hockey"
+                    teams = item.get("teams") or {}
+                    home = (teams.get("home") or {}).get("name") or "Home"
+                    away = (teams.get("away") or {}).get("name") or "Away"
+                    dt = item.get("date") or ""
+                    emoji = "🏒"
+                else:
+                    league = (item.get("league") or {}).get("name") or "Unknown league"
+                    teams = item.get("teams") or {}
+                    home = (teams.get("home") or {}).get("name") or "Home"
+                    away = (teams.get("away") or {}).get("name") or "Away"
+                    fixture = item.get("fixture") or {}
+                    dt = fixture.get("date") or ""
+                    emoji = "⚽"
 
                 log.info("API-SPORTS connected via %s", url)
                 log.info("API-SPORTS sample: %s | %s vs %s | %s", league, home, away, dt)
 
-                details = f"⚽ {home} vs {away}\n{league}\n{dt}"
+                details = f"{emoji} {home} vs {away}\n{league}\n{dt}"
                 return CheckResult(name="API-SPORTS", ok=True, details=details)
 
-        msg = last_fail or "не удалось получить fixtures (next и date)"
+        msg = last_fail or "не удалось получить fixtures по date= (football/hockey)"
         return CheckResult(name="API-SPORTS", ok=False, details=msg)
     except Exception as e:
         msg = _safe_err(e)

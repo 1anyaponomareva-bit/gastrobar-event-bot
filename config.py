@@ -129,3 +129,28 @@ GASTROBAR_TV_COUNT: int = max(1, int(os.getenv("GASTROBAR_TV_COUNT", "2") or "2"
 # Football now24: минимальный football_watchability_score (API-SPORTS)
 # Устарело: футбол использует RADAR_MIN_WATCHABILITY (см. gastrobar_event_filter).
 NOW24_FOOTBALL_MIN_WATCHABILITY: int = RADAR_MIN_WATCHABILITY
+
+# BetBoom-first Event Radar
+BETBOOM_BASE_URL: str = (os.getenv("BETBOOM_BASE_URL") or "https://betboom.ru").strip().rstrip("/")
+BETBOOM_SITE_API: str = (
+    os.getenv("BETBOOM_SITE_API") or "https://siteapi.betboom.ru/api/site_api/v1"
+).strip().rstrip("/")
+BETBOOM_JSON_URL: str = os.getenv("BETBOOM_JSON_URL", "").strip()
+BETBOOM_USE_PLAYWRIGHT: bool = os.getenv("BETBOOM_USE_PLAYWRIGHT", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+BETBOOM_API_FALLBACK: bool = os.getenv("BETBOOM_API_FALLBACK", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+RADAR_GEMINI_DISCOVERY: bool = os.getenv("RADAR_GEMINI_DISCOVERY", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)

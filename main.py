@@ -70,12 +70,15 @@ from event_radar import (
     radar_fetch_header,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+from error_handling import configure_logging, format_telegram_exception
+
+configure_logging()
 log = logging.getLogger(__name__)
 logger = log
+
+
+def _radar_log_context(mode: str) -> str:
+    return "NOW24 unexpected error" if mode == "now24" else "WEEK unexpected error"
 
 router = Router()
 # Event Radar (Gemini + Google Search) может занять дольше, чем спортивный API.
@@ -97,12 +100,18 @@ def _ru_found_events_line(n: int) -> str:
     return f"Найдено {n} {w}."
 
 
-def _ru_selected_main_line(n: int) -> str:
+def _ru_selected_main_line(n: int, *, mode: str = "next72") -> str:
+    if mode == "now24":
+        if n % 10 == 1 and n % 100 != 11:
+            return f"Выбрано {n} событие на ближайшие 24 часа."
+        if 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20):
+            return f"Выбрано {n} события на ближайшие 24 часа."
+        return f"Выбрано {n} событий на ближайшие 24 часа."
     if n % 10 == 1 and n % 100 != 11:
-        return f"Выбрано {n} главное событие недели."
+        return f"Выбрано {n} событие на 3 дня."
     if 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20):
-        return f"Выбрано {n} главных события недели."
-    return f"Выбрано {n} главных событий недели."
+        return f"Выбрано {n} события на 3 дня."
+    return f"Выбрано {n} событий на 3 дня."
 
 
 def _fail_conflict(context: str) -> None:
@@ -198,6 +207,8 @@ async def set_bot_commands(bot: Bot) -> None:
         BotCommand(command="daily", description="Пост дня (одно событие)"),
         BotCommand(command="clear_cache", description="Очистить weekly cache (admin)"),
         BotCommand(command="debug_cache", description="Статус weekly cache (admin)"),
+        BotCommand(command="radar_debug", description="Event Radar: счётчики и отбраковка"),
+        BotCommand(command="api_status", description="API-SPORTS: статус по видам спорта"),
     ]
     scopes = (
         BotCommandScopeDefault(),
@@ -240,21 +251,30 @@ async def cmd_start(message: Message) -> None:
         f"Бот живой. Твой ID: {user_id}\n\n"
         "Команды меню обновлены. Открой кнопку меню слева от поля ввода — там "
         "/start, /events, /check и /gemini_test.\n\n"
-        "Event Radar: /events — меню (афиша недели или события 24 ч).\n"
-        "Команду /week можно ввести вручную — она делает то же, что /events (в меню не показывается).\n\n"
+        "Event Radar: /events — ⚡ 24 часа или 🔥 афиша на 3 дня (BetBoom).\n"
+        "Команду /week можно ввести вручную — то же, что афиша на 3 дня.\n\n"
         "Если списка нет: полностью закрой чат с ботом и открой снова, либо обнови Telegram."
         f"{build_line}"
     )
 
 
 def _events_menu_text() -> str:
-    return (
+    from runtime_messages import build_tag_line
+
+    body = (
         "Что собрать?\n\n"
-        "📅 Афиша на неделю\n"
-        "— главные события ближайших 7 дней\n\n"
-        "⚡ События ближайших 24 часов\n"
-        "— события, которые начнутся в течение суток, плюс готовый пост для Telegram"
+        "🔥 Афиша на 3 дня\n"
+        "— главные события ближайших 3 дней (BetBoom)\n\n"
+        "⚡ Ближайшие 24 часа\n"
+        "— что начнётся в ближайшие 24 ч + пост на сегодня"
     )
+    return f"{body}\n\n{build_tag_line()}"
+
+
+def _normalize_radar_mode(mode: str) -> str:
+    if mode in ("week", "next72"):
+        return "next72"
+    return mode
 
 
 async def _deliver_weekly_cache(
@@ -265,9 +285,11 @@ async def _deliver_weekly_cache(
     header: str,
 ) -> None:
     last_week_events[user_id] = cached
-    current_message_context[user_id] = {"mode": "week", "events": list(cached)}
+    current_message_context[user_id] = {"mode": "next72", "events": list(cached)}
     stats = _ru_selected_main_line(len(cached))
-    body = format_radar_week_message(cached)
+    from event_radar import format_radar_next72_message
+
+    body = format_radar_next72_message(cached)
     await message.answer(
         f"{header}\n\n{stats}\n\n{body}",
         reply_markup=radar_week_result_kb(),
@@ -282,8 +304,48 @@ async def _answer_radar_empty(
     pre_count: int,
     fetch_note: str | None,
 ) -> None:
-    from runtime_messages import event_radar_error_message, resolve_radar_error_code
+    from api_sports_status import format_api_failure_user_message, is_api_failure_note
+    from runtime_messages import (
+        build_tag_line,
+        event_radar_error_message,
+        resolve_radar_error_code,
+    )
     from weekly_events_cache import get_weekly_events_cache_for_display
+
+    if fetch_note in ("betboom_unavailable", "betboom_parse_error"):
+        from betboom_parser import format_betboom_unavailable_message
+
+        cached = await get_weekly_events_cache_for_display()
+        if cached:
+            await _deliver_weekly_cache(
+                message,
+                user_id,
+                cached,
+                header=(
+                    f"📦 Афиша на 3 дня из кэша ({len(cached)} событий).\n"
+                    f"{format_betboom_unavailable_message(fetch_note)}"
+                ),
+            )
+            return
+        await message.answer(
+            format_betboom_unavailable_message(fetch_note) + f"\n\n{build_tag_line()}"
+        )
+        return
+
+    if is_api_failure_note(fetch_note):
+        cached = await get_weekly_events_cache_for_display()
+        if cached:
+            await _deliver_weekly_cache(
+                message,
+                user_id,
+                cached,
+                header=format_api_failure_user_message(fetch_note),
+            )
+            return
+        await message.answer(
+            format_api_failure_user_message(fetch_note) + f"\n\n{build_tag_line()}"
+        )
+        return
 
     if fetch_note in (
         "gemini_quota",
@@ -299,7 +361,7 @@ async def _answer_radar_empty(
             if fetch_note == "gemini_quota":
                 quota_hint = (
                     "\n⚠️ Лимит Gemini (≈20 запросов/день на free tier) — "
-                    "времена могут быть старыми. Завтра нажмите «Обновить неделю»."
+                    "времена могут быть старыми. Завтра нажмите «Обновить 3 дня»."
                 )
             if fetch_note == "weekly_cache_quota":
                 hdr = (
@@ -333,7 +395,17 @@ async def _answer_radar_empty(
         prelim_count=pre_count,
         selected=0,
     )
-    await message.answer(event_radar_error_message(code))
+    if code == "unexpected_error":
+        logger.exception(
+            "WEEK empty handler -> unexpected_error fetch_note=%r raw=%s pre=%s",
+            fetch_note,
+            raw_total,
+            pre_count,
+            exc_info=True,
+        )
+    await message.answer(
+        event_radar_error_message(code, fetch_note=fetch_note)
+    )
 
 
 async def _run_radar_mode(
@@ -354,12 +426,13 @@ async def _run_radar_mode(
     if not message:
         return
 
+    mode = _normalize_radar_mode(mode)
     chat_id = message.chat.id
-    label = "афиша на неделю" if mode == "week" else "события 24 часа"
+    label = "афиша на 3 дня" if mode == "next72" else "ближайшие 24 часа"
     search_hint = (
         "📦 Загружаю сохранённую афишу…"
-        if mode == "week" and not force_refresh
-        else f"🔍 Ищу: {label}\n✍️ (1× Gemini Search + локальная проверка)"
+        if mode == "next72" and not force_refresh
+        else f"🔍 Ищу: {label}\n✍️ (BetBoom линия · VN время)"
     )
 
     events: list[dict[str, Any]] = []
@@ -376,7 +449,7 @@ async def _run_radar_mode(
             t0 = time.monotonic()
             logger.info("radar:%s fetch started user_id=%s", mode, user_id)
             try:
-                if mode == "week":
+                if mode == "next72":
                     coro = get_event_radar_week(force_refresh=force_refresh)
                 else:
                     coro = get_event_radar_now24()
@@ -406,17 +479,18 @@ async def _run_radar_mode(
                 from weekly_events_cache import get_weekly_events_cache_for_display
 
                 logger.exception(
-                    "radar:%s failed after %.1fs",
-                    mode,
+                    "%s (inner fetch, %.1fs)",
+                    _radar_log_context(mode),
                     time.monotonic() - t0,
+                    exc_info=True,
                 )
-                if mode == "week":
+                if mode == "next72":
                     cached = await get_weekly_events_cache_for_display()
                     if cached:
                         try:
                             await status_msg.delete()
                         except Exception:
-                            pass
+                            logger.exception("status_msg.delete failed", exc_info=True)
                         await _deliver_weekly_cache(
                             message,
                             user_id,
@@ -430,8 +504,7 @@ async def _run_radar_mode(
                         return
                 code = resolve_radar_error_code(exception=exc)
                 await status_msg.edit_text(
-                    event_radar_error_message(code)
-                    + f"\n\n({type(exc).__name__}: {str(exc)[:120]})"
+                    event_radar_error_message(code, exc=exc)
                 )
                 return
             logger.info(
@@ -444,14 +517,14 @@ async def _run_radar_mode(
             try:
                 await status_msg.delete()
             except Exception:
-                pass
+                logger.exception("status_msg.delete failed", exc_info=True)
 
-        if mode == "week" and events:
+        if mode == "next72" and events:
             from weekly_football_times import enrich_weekly_football_times
 
             events = await enrich_weekly_football_times(events)
 
-        if mode == "week":
+        if mode == "next72":
             last_week_events[user_id] = events if selected else []
         else:
             last_now24_events[user_id] = events if selected else []
@@ -462,12 +535,15 @@ async def _run_radar_mode(
 
         if selected == 0:
             if mode == "now24":
+                from event_radar_pipeline import get_last_now24_debug
                 from runtime_messages import format_now24_empty_message
 
                 await message.answer(
                     format_now24_empty_message(
-                        pool_count=pre_count or raw_total,
+                        pool_count=raw_total,
+                        window_count=pre_count,
                         fetch_note=fetch_note,
+                        debug=get_last_now24_debug(),
                     ),
                     reply_markup=radar_now24_result_kb(),
                 )
@@ -486,22 +562,30 @@ async def _run_radar_mode(
         )
 
         extra = radar_fetch_header(fetch_note, events if mode == "now24" else None)
-        found_n = pre_count if mode == "week" and pre_count else raw_total
-        stats = f"{_ru_found_events_line(found_n)}\n{_ru_selected_main_line(selected)}"
+        found_n = pre_count if mode == "next72" and pre_count else raw_total
+        stats = (
+            f"{_ru_found_events_line(found_n)}\n"
+            f"{_ru_selected_main_line(selected, mode=mode)}"
+        )
+        from event_radar import format_radar_next72_message
+
         body = (
-            format_radar_week_message(events)
-            if mode == "week"
+            format_radar_next72_message(events)
+            if mode == "next72"
             else format_radar_now24_message(events)
         )
         text = f"{extra}\n{stats}\n\n{body}" if extra else f"{stats}\n\n{body}"
-        kb = radar_week_result_kb() if mode == "week" else radar_now24_result_kb()
+        kb = radar_week_result_kb() if mode == "next72" else radar_now24_result_kb()
         async with show_typing(bot, chat_id):
             await message.answer(text, reply_markup=kb)
     except Exception as exc:
-        from runtime_messages import event_radar_error_message
-
-        logger.exception("radar:%s unhandled error user_id=%s", mode, user_id)
-        await message.answer(event_radar_error_message("unexpected_error"))
+        logger.exception(
+            "%s (outer handler user_id=%s)",
+            _radar_log_context(mode),
+            user_id,
+            exc_info=True,
+        )
+        await message.answer(format_telegram_exception(exc))
 
 
 @router.message(Command("events", "week"))
@@ -519,16 +603,28 @@ async def cmd_events_or_week(message: Message) -> None:
         raise
 
 
+@router.callback_query(F.data == "radar:next72")
+async def radar_next72(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await _run_radar_mode(callback, "next72", force_refresh=False)
+
+
+@router.callback_query(F.data == "radar:next72:force")
+async def radar_next72_force(callback: CallbackQuery) -> None:
+    await callback.answer("Обновление афиши на 3 дня…")
+    await _run_radar_mode(callback, "next72", force_refresh=True)
+
+
 @router.callback_query(F.data == "radar:week")
 async def radar_week(callback: CallbackQuery) -> None:
     await callback.answer()
-    await _run_radar_mode(callback, "week", force_refresh=False)
+    await _run_radar_mode(callback, "next72", force_refresh=False)
 
 
 @router.callback_query(F.data == "radar:week:force")
 async def radar_week_force(callback: CallbackQuery) -> None:
-    await callback.answer("Принудительное обновление…")
-    await _run_radar_mode(callback, "week", force_refresh=True)
+    await callback.answer("Обновление афиши на 3 дня…")
+    await _run_radar_mode(callback, "next72", force_refresh=True)
 
 
 @router.callback_query(F.data == "radar:now24")
@@ -550,6 +646,7 @@ async def radar_close(callback: CallbackQuery) -> None:
 
 
 def _events_from_context(user_id: int, mode: str) -> list[dict[str, Any]]:
+    mode = _normalize_radar_mode(mode)
     ctx = current_message_context.get(user_id) or {}
     if ctx.get("mode") == mode and ctx.get("events"):
         return list(ctx["events"])
@@ -558,41 +655,49 @@ def _events_from_context(user_id: int, mode: str) -> list[dict[str, Any]]:
     return list(last_week_events.get(user_id) or [])
 
 
-@router.callback_query(F.data.in_({"radar:post_week", "radar:week:gen"}))
-async def radar_post_week(callback: CallbackQuery) -> None:
+@router.callback_query(
+    F.data.in_({"radar:post_next72", "radar:post_week", "radar:week:gen"})
+)
+async def radar_post_next72(callback: CallbackQuery) -> None:
     await callback.answer()
-    user_id = callback.from_user.id
-    logger.info("POST GENERATION: mode=week no-search")
-    events = _events_from_context(user_id, "week")
-    logger.info("POST_WEEK_FROM_STATE: %s", [e.get("title") for e in events])
-    if not events:
-        await callback.message.answer(
-            "Нет сохранённой недельной афиши. Сначала нажмите 📅 Афиша на неделю."
+    try:
+        user_id = callback.from_user.id
+        logger.info("POST GENERATION: mode=next72 no-search")
+        events = _events_from_context(user_id, "next72") or _events_from_context(
+            user_id, "week"
         )
-        return
-    async with show_typing(callback.bot, callback.message.chat.id):
-        await callback.message.answer("Пишу пост по афише недели…")
-        post_text = await generate_weekly_poster(events)
-    draft_id = await insert_draft("week_post", post_text, "draft")
-    last_draft_state[user_id] = {"draft_id": draft_id, "events": events}
-    await callback.message.answer(post_text, reply_markup=post_result_kb(draft_id))
+        logger.info("POST_NEXT72_FROM_STATE: %s", [e.get("title") for e in events])
+        if not events:
+            await callback.message.answer(
+                "Нет сохранённой афиши на 3 дня. Сначала нажмите 🔥 Афиша на 3 дня."
+            )
+            return
+        async with show_typing(callback.bot, callback.message.chat.id):
+            await callback.message.answer("Пишу пост по афише на 3 дня…")
+            post_text = await generate_weekly_poster(events)
+        draft_id = await insert_draft("week_post", post_text, "draft")
+        last_draft_state[user_id] = {"draft_id": draft_id, "events": events}
+        await callback.message.answer(post_text, reply_markup=post_result_kb(draft_id))
+    except Exception as exc:
+        logger.exception("Callback failed: radar_post_next72", exc_info=True)
+        await callback.message.answer(format_telegram_exception(exc))
 
 
 @router.callback_query(F.data == "radar:post_now24")
 async def radar_post_now24(callback: CallbackQuery) -> None:
     await callback.answer()
-    user_id = callback.from_user.id
-    chat_id = callback.message.chat.id
-    logger.info("POST GENERATION: mode=now24 no-search")
-    events = _events_from_context(user_id, "now24")
-    logger.info("POST_NOW24_FROM_STATE: %s", [e.get("title") for e in events])
-    if not events:
-        await callback.message.answer(
-            "Нет сохранённых событий 24 часа. "
-            "Сначала нажмите ⚡ События ближайших 24 часов."
-        )
-        return
     try:
+        user_id = callback.from_user.id
+        chat_id = callback.message.chat.id
+        logger.info("POST GENERATION: mode=now24 no-search")
+        events = _events_from_context(user_id, "now24")
+        logger.info("POST_NOW24_FROM_STATE: %s", [e.get("title") for e in events])
+        if not events:
+            await callback.message.answer(
+                "Нет сохранённых событий на 24 часа. "
+                "Сначала нажмите ⚡ Ближайшие 24 часа в /events."
+            )
+            return
         from daily_event_posts import build_post_from_saved_events
 
         async with long_operation_typing(
@@ -609,24 +714,27 @@ async def radar_post_now24(callback: CallbackQuery) -> None:
                 ),
                 timeout=WEEK_FETCH_TIMEOUT_SEC,
             )
+        if not result.ok or not result.package:
+            await callback.message.answer(
+                result.error_detail or "Не удалось оформить пост."
+            )
+            return
+        pkg = result.package
+        daily_post_state[user_id] = {
+            "draft_id": pkg.draft_id,
+            "event": pkg.events[0] if pkg.events else {},
+            "events": pkg.events,
+            "image_path": pkg.image_path,
+            "poster_source": pkg.image_source,
+            "mode": "now24",
+        }
+        await deliver_daily_content(callback.bot, pkg, chat_id=chat_id)
     except asyncio.TimeoutError:
+        logger.warning("Callback radar_post_now24 timeout")
         await callback.message.answer("Таймаут. Повторите позже.")
-        return
-    if not result.ok or not result.package:
-        await callback.message.answer(
-            result.error_detail or "Не удалось оформить пост."
-        )
-        return
-    pkg = result.package
-    daily_post_state[user_id] = {
-        "draft_id": pkg.draft_id,
-        "event": pkg.events[0] if pkg.events else {},
-        "events": pkg.events,
-        "image_path": pkg.image_path,
-        "poster_source": pkg.image_source,
-        "mode": "now24",
-    }
-    await deliver_daily_content(callback.bot, pkg, chat_id=chat_id)
+    except Exception as exc:
+        logger.exception("Callback failed: radar_post_now24", exc_info=True)
+        await callback.message.answer(format_telegram_exception(exc))
 
 
 @router.message(Command("daily"))
@@ -679,9 +787,9 @@ async def cmd_daily(message: Message) -> None:
     except asyncio.TimeoutError:
         logger.warning("cmd /daily timeout")
         await message.answer("Таймаут. Повторите позже.")
-    except Exception:
-        logger.exception("cmd /daily unexpected error")
-        await message.answer("Ошибка: unexpected error")
+    except Exception as exc:
+        logger.exception("cmd /daily unexpected error", exc_info=True)
+        await message.answer(format_telegram_exception(exc))
 
 
 @router.callback_query(F.data.startswith("daily:pub:"))
@@ -707,9 +815,9 @@ async def daily_publish(callback: CallbackQuery, bot: Bot) -> None:
             await bot.send_message(GASTROBAR_GROUP_ID, caption)
         await update_draft_status(draft_id, "published")
         await callback.message.answer("Пост дня опубликован в группу.")
-    except Exception:
-        logger.exception("daily publish failed")
-        await callback.message.answer("Не удалось опубликовать пост дня.")
+    except Exception as exc:
+        logger.exception("Callback failed: daily_publish", exc_info=True)
+        await callback.message.answer(format_telegram_exception(exc))
 
 
 @router.callback_query(F.data.startswith("daily:redo:"))
@@ -764,9 +872,9 @@ async def daily_redo(callback: CallbackQuery) -> None:
             "poster_source": pkg.image_source,
         }
         await deliver_daily_content(callback.bot, pkg, chat_id=callback.message.chat.id)
-    except Exception:
-        logger.exception("daily redo failed")
-        await callback.message.answer("Не удалось переделать пост.")
+    except Exception as exc:
+        logger.exception("Callback failed: daily_redo", exc_info=True)
+        await callback.message.answer(format_telegram_exception(exc))
 
 
 @router.callback_query(F.data.startswith("daily:cancel:"))
@@ -778,8 +886,10 @@ async def daily_cancel(callback: CallbackQuery) -> None:
         user_id = callback.from_user.id
         daily_post_state.pop(user_id, None)
         await callback.message.answer("Пост дня отменён.")
-    except Exception:
-        logger.exception("daily cancel failed")
+    except Exception as exc:
+        logger.exception("Callback failed: daily_cancel", exc_info=True)
+        if callback.message:
+            await callback.message.answer(format_telegram_exception(exc))
 
 
 @router.message(Command("gemini_test"))
@@ -789,11 +899,11 @@ async def cmd_gemini_test(message: Message) -> None:
             await message.answer("Проверяю Gemini (plain + Google Search)…")
             report = await run_gemini_test()
         await message.answer(report.format_telegram())
-    except Exception:
-        logger.exception("gemini_test failed")
+    except Exception as exc:
+        logger.exception("gemini_test unexpected error", exc_info=True)
         from runtime_messages import gemini_test_error_message
 
-        await message.answer(gemini_test_error_message())
+        await message.answer(gemini_test_error_message(exc))
 
 
 @router.message(Command("clear_cache"))
@@ -836,6 +946,48 @@ async def cmd_debug_cache(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
+@router.message(Command("radar_debug"))
+async def cmd_radar_debug(message: Message) -> None:
+    if not message.from_user or message.from_user.id != ADMIN_ID:
+        await message.answer("Команда только для администратора.")
+        return
+    from event_radar_pipeline import get_radar_debug_report
+
+    await message.answer("⏳ Собираю rule-based radar debug (API)…")
+    async with show_typing(message.bot, message.chat.id):
+        try:
+            body = await asyncio.wait_for(get_radar_debug_report(), timeout=120.0)
+        except asyncio.TimeoutError:
+            await message.answer("❌ radar_debug: таймаут API (>120 с).")
+            return
+        except Exception as exc:
+            logger.exception("RADAR_DEBUG unexpected error", exc_info=True)
+            await message.answer(format_telegram_exception(exc))
+            return
+    if len(body) > 4000:
+        body = body[:3990] + "\n…(обрезано)"
+    await message.answer(body)
+
+
+@router.message(Command("api_status"))
+async def cmd_api_status(message: Message) -> None:
+    from api_sports_status import format_api_status_report
+
+    async with show_typing(message.bot, message.chat.id):
+        try:
+            body = await asyncio.wait_for(format_api_status_report(), timeout=90.0)
+        except asyncio.TimeoutError:
+            await message.answer("⏱ /api_status: таймаут (>90 с).")
+            return
+        except Exception as exc:
+            logger.exception("API_STATUS unexpected error", exc_info=True)
+            await message.answer(format_telegram_exception(exc))
+            return
+    if len(body) > 4000:
+        body = body[:3990] + "\n…(обрезано)"
+    await message.answer(body)
+
+
 @router.message(Command("check"))
 async def cmd_check(message: Message) -> None:
     telegram_line = "✅ Telegram API connected"
@@ -863,9 +1015,10 @@ async def cmd_help_hint(message: Message) -> None:
     await message.answer(
         "Я отвечаю только на команды:\n"
         "/start — проверка, что бот на связи\n"
-        "/events — Event Radar (меню: неделя / 24 ч)\n"
+        "/events — Event Radar (24 ч / афиша на 3 дня)\n"
         "/daily — готовый пост на сегодня\n"
         "/check — проверка подключений API\n"
+        "/api_status — статус API-SPORTS по видам спорта\n"
         "/gemini_test — тест Gemini и Google Search\n\n"
         "В меню Telegram: /start, /events, /daily, /check, /gemini_test. Команду /week можно ввести вручную — "
         "она вызывает тот же сценарий, что и /events.\n\n"
@@ -886,9 +1039,9 @@ async def draft_publish(callback: CallbackQuery, bot: Bot) -> None:
         await update_draft_status(draft_id, "published")
         logger.info("draft published: id=%s", draft_id)
         await callback.message.answer("Опубликовал в группу.")
-    except Exception:
-        logger.exception("draft publish failed")
-        await callback.message.answer("Не удалось опубликовать.")
+    except Exception as exc:
+        logger.exception("Callback failed: draft_publish", exc_info=True)
+        await callback.message.answer(format_telegram_exception(exc))
 
 
 @router.callback_query(F.data.startswith("draft:redo:"))
@@ -909,9 +1062,9 @@ async def draft_redo(callback: CallbackQuery) -> None:
         last_draft_state[user_id] = {"draft_id": new_draft_id, "events": events}
         logger.info("draft regenerated: old_id=%s new_id=%s", old_draft_id, new_draft_id)
         await callback.message.answer(new_text, reply_markup=post_result_kb(new_draft_id))
-    except Exception:
-        logger.exception("draft regenerate failed")
-        await callback.message.answer("Не удалось переделать пост.")
+    except Exception as exc:
+        logger.exception("Callback failed: draft_redo", exc_info=True)
+        await callback.message.answer(format_telegram_exception(exc))
 
 
 @router.callback_query(F.data.startswith("draft:cancel:"))
@@ -925,9 +1078,9 @@ async def draft_cancel(callback: CallbackQuery) -> None:
             del last_draft_state[user_id]
         logger.info("draft cancelled: id=%s", draft_id)
         await callback.message.answer("Ок, не публикуем.")
-    except Exception:
-        logger.exception("draft cancel failed")
-        await callback.message.answer("Не удалось отменить черновик.")
+    except Exception as exc:
+        logger.exception("Callback failed: draft_cancel", exc_info=True)
+        await callback.message.answer(format_telegram_exception(exc))
 
 
 async def main() -> None:

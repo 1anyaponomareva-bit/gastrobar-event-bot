@@ -150,6 +150,10 @@ def lock_events_for_formatter(
         sched_tm = str(e.get("local_time") or e.get("time", "")).strip()
         sched_wd = str(e.get("local_weekday") or e.get("weekday", "")).strip()
         sched_date = str(e.get("local_date") or e.get("date", "")).strip()
+        from radar_rules import detect_sport, emoji_for_sport
+
+        sport = detect_sport(e)
+        em = emoji_for_sport(sport, e) or str(e.get("emoji", "🏟")).strip() or "🏟"
         locked.append(
             LockedEvent(
                 title=title,
@@ -158,7 +162,7 @@ def lock_events_for_formatter(
                 date=sched_date,
                 category=str(e.get("category", "")).strip(),
                 subtitle=str(e.get("subtitle", e.get("league", ""))).strip(),
-                emoji=str(e.get("emoji", "🏟")).strip() or "🏟",
+                emoji=em,
                 participants=str(e.get("participants", "")).strip() or title,
                 lock_id=_lock_id_from_event(e),
                 utc_datetime=str(e.get("utc_datetime", "")).strip(),

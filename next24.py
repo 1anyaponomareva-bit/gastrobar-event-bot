@@ -33,44 +33,11 @@ def next24_bounds(now: datetime | None = None) -> tuple[datetime, datetime]:
 
 
 def resolve_event_local_datetime_vn(event: dict[str, Any]) -> datetime | None:
-    """
-    Canonical старт события в VN: local_datetime (aware) или local_date + local_time.
-    Naive ISO без зоны трактуется как Asia/Ho_Chi_Minh (не UTC).
-    """
-    raw = str(event.get("local_datetime", "")).strip()
-    if raw:
-        s = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
-        try:
-            dt = datetime.fromisoformat(s)
-        except ValueError:
-            dt = None
-        if dt is not None:
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=VN_TZ)
-            return dt.astimezone(VN_TZ)
+    """Канонический старт в VN — через normalize_event_datetime (timestamp → UTC → VN)."""
+    from event_datetime_norm import normalize_event_datetime
 
-    date_s = str(event.get("local_date") or event.get("date", "")).strip()
-    time_s = str(
-        event.get("local_time")
-        or event.get("time")
-        or event.get("display_time")
-        or event.get("time_display")
-        or ""
-    ).strip()
-    time_s = time_s.removeprefix("≈").strip()
-    if time_s == "время уточняется" or not time_s:
-        return None
-    if not _DATE_RE.match(date_s):
-        return None
-    norm, _ = _parse_time_flexible(time_s)
-    if not norm:
-        return None
-    try:
-        d = date.fromisoformat(date_s)
-        hh, mm = map(int, norm.split(":"))
-        return datetime.combine(d, dtime(hh, mm), tzinfo=VN_TZ)
-    except ValueError:
-        return None
+    sport = str(event.get("sport", "") or "").strip().lower()
+    return normalize_event_datetime(event, sport=sport)
 
 
 def is_in_next24_window(

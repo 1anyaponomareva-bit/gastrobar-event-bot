@@ -71,9 +71,9 @@ def today_local() -> datetime:
 
 
 def current_week_bounds() -> tuple[date, date]:
-    """week_start = сегодня (VN), week_end = сегодня + 7 дней."""
+    """Legacy: календарные границы ~72 ч (today .. today+2)."""
     t = today_local().date()
-    return t, t + timedelta(days=7)
+    return t, t + timedelta(days=2)
 
 
 def _event_local_date(e: dict[str, Any]) -> date | None:
@@ -97,18 +97,14 @@ def _event_local_date(e: dict[str, Any]) -> date | None:
 
 
 def is_in_current_week(e: dict[str, Any]) -> bool:
-    """Совпадает с event_radar_pipeline: now <= event_local <= now + 7 дней (VN)."""
+    """NEXT72: now <= event_local <= now + 72h (VN)."""
     from next24 import resolve_event_local_datetime_vn, vn_now
 
     dt = resolve_event_local_datetime_vn(e)
     if dt is None:
-        d = _event_local_date(e)
-        if d is None:
-            return False
-        start, end = current_week_bounds()
-        return start <= d <= end
+        return False
     now_local = vn_now()
-    end_local = now_local + timedelta(days=7)
+    end_local = now_local + timedelta(hours=72)
     return now_local <= dt <= end_local
 
 

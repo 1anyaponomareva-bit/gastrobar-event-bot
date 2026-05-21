@@ -8,13 +8,13 @@ def radar_menu_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📅 Афиша на неделю",
-                    callback_data="radar:week",
+                    text="🔥 Афиша на 3 дня",
+                    callback_data="radar:next72",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="⚡ События ближайших 24 часов",
+                    text="⚡ Ближайшие 24 часа",
                     callback_data="radar:now24",
                 ),
             ],
@@ -22,19 +22,19 @@ def radar_menu_kb() -> InlineKeyboardMarkup:
     )
 
 
-def radar_week_result_kb() -> InlineKeyboardMarkup:
+def radar_next72_result_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="📋 Сгенерировать пост",
-                    callback_data="radar:post_week",
+                    callback_data="radar:post_next72",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="🔄 Обновить принудительно",
-                    callback_data="radar:week:force",
+                    text="🔄 Обновить 3 дня",
+                    callback_data="radar:next72:force",
                 ),
             ],
             [
@@ -45,6 +45,11 @@ def radar_week_result_kb() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def radar_week_result_kb() -> InlineKeyboardMarkup:
+    """Legacy alias."""
+    return radar_next72_result_kb()
 
 
 def radar_now24_result_kb() -> InlineKeyboardMarkup:
@@ -58,7 +63,7 @@ def radar_now24_result_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="🔄 Обновить 24 часа",
+                    text="🔄 Обновить 24 ч",
                     callback_data="radar:now24",
                 ),
             ],

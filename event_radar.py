@@ -1,11 +1,11 @@
 """
-Event Radar — AI Event Editor для Gastrobar (Gemini Search + watchability score).
+Event Radar — Gastrobar афиша.
 
-Отбор: что реально смотреть в баре (топ-матчи, дерби, F1-уикенд, плей-офф, не только grand finals).
-Отсекаются сериальные финалы Chicago Med/Fire/P.D. и прочий TV noise.
-
-По умолчанию один запрос Gemini+Search на всю неделю (экономия лимита free tier). Несколько шардов —
-только если в .env RADAR_MULTI_SHARD=1 (для платного/высокого лимита).
+Архитектура:
+  Gemini Search = discovery (scout: F1, esports, Eurovision, тренды без API-Sports)
+  API-Sports    = discovery (матчи с fixture UTC)
+  light verify  = datetime / окно / не историческое (без strict API match)
+  radar_rules   = финальный редактор (ranking, inclusion)
 """
 from __future__ import annotations
 
@@ -948,7 +948,7 @@ def _select_weekly_radar_events(verified: list[dict[str, Any]]) -> list[dict[str
     from event_radar_pipeline import finalize_week_output, pipeline_finalize_events
 
     prepared = [_prepare_for_afisha_selection(dict(e)) for e in verified]
-    out = pipeline_finalize_events(prepared, mode="week")
+    out = pipeline_finalize_events(prepared, mode="next72")
     return finalize_week_output(out)
 
 
@@ -1241,134 +1241,130 @@ async def get_event_radar_week(
     *,
     force_refresh: bool = False,
 ) -> tuple[list[dict[str, Any]], int, int, int, str | None]:
-    """Афиша недели: кэш за сегодня → иначе 1× Gemini discovery + локальный verify."""
-    from gemini_usage import should_skip_gemini_discovery
+    """Афиша на 3 дня: BetBoom-first → radar_rules (без Gemini Search)."""
+    from betboom_parser import is_betboom_failure_note
     from weekly_events_cache import (
         get_weekly_events_cache_for_display,
         save_weekly_events_cache,
-        weekly_cache_updated_today_vn,
     )
 
-    if not force_refresh:
-        if await weekly_cache_updated_today_vn():
-            cached = await get_weekly_events_cache_for_display()
-            if cached and len(cached) >= RADAR_API_MIN_SEED:
-                log.info("Event Radar week: cache today (%s events)", len(cached))
-                return (
-                    cached,
-                    len(cached),
-                    len(cached),
-                    len(cached),
-                    "weekly_cache_today",
-                )
-            if cached:
-                log.info(
-                    "Event Radar week: thin cache today (%s) — refetch API pool",
-                    len(cached),
-                )
+    from event_radar_pipeline import get_next72_from_pipeline
 
-    if not force_refresh and await should_skip_gemini_discovery():
-        cached = await get_weekly_events_cache_for_display()
-        if cached:
-            log.info("Event Radar week: quota guard → cached (%s)", len(cached))
-            return (
-                cached,
-                len(cached),
-                len(cached),
-                len(cached),
-                "weekly_cache_quota",
-            )
+    from api_sports_status import is_truly_empty_radar_note
 
-    from event_radar_pipeline import get_week_from_pipeline
-
-    final_api, raw_api, note_api = await get_week_from_pipeline()
+    final_api, raw_api, note_api = await get_next72_from_pipeline(
+        include_gemini=False,
+        force_gemini=force_refresh,
+        force_refresh=force_refresh,
+    )
     if final_api:
         log.info(
-            "Event Radar week: unified API first raw=%s final=%s",
+            "Event Radar next72: raw=%s final=%s note=%s",
             raw_api,
             len(final_api),
+            note_api,
         )
-        await save_weekly_events_cache(final_api, source="api_unified")
-        return final_api, raw_api, raw_api, len(final_api), note_api or "api_unified"
+        src = "betboom_unified" if (note_api or "").startswith("betboom") else "radar_unified"
+        await save_weekly_events_cache(final_api, source=src)
+        return final_api, raw_api, raw_api, len(final_api), note_api or src
 
-    log.info(
-        "Event Radar week: unified API empty (raw=%s) — fallback Gemini pipeline",
-        raw_api,
-    )
-    pool, raw_total, prelim, fetch_note = await _fetch_radar_pipeline(
-        force_gemini=False,
-    )
-    final = _finalize_week_selection(pool, prelim)
-    log.info(
-        "Event Radar week: FOUND(raw_api)=%s POOL=%s FINAL=%s note=%s",
-        raw_total,
-        len(pool),
-        len(final),
-        fetch_note,
-    )
-
-    if not final and fetch_note in ("gemini_quota", "gemini_error", "gemini_overloaded"):
+    if is_betboom_failure_note(note_api):
         cached = await get_weekly_events_cache_for_display()
         if cached:
+            log.info(
+                "Event Radar next72: BetBoom down — stale cache (%s events)",
+                len(cached),
+            )
             return (
                 cached,
                 len(cached),
                 len(cached),
                 len(cached),
-                "weekly_cache_quota",
+                "weekly_cache_api_down",
             )
-        fallback, fb_raw = await _fallback_events_from_sports_api()
-        if fallback:
-            await save_weekly_events_cache(fallback, source="sports_fallback")
-            return fallback, fb_raw, 0, len(fallback), "sports_fallback"
+        log.warning("Event Radar next72: BetBoom unavailable, no cache note=%s", note_api)
+        return [], raw_api, 0, 0, note_api
 
-    if final:
-        await save_weekly_events_cache(final, source="weekly_radar")
-    return final, raw_total, raw_total, len(final), fetch_note
+    if not force_refresh:
+        cached = await get_weekly_events_cache_for_display()
+        if cached:
+            log.info("Event Radar next72: empty window — stale cache (%s)", len(cached))
+            return (
+                cached,
+                len(cached),
+                len(cached),
+                len(cached),
+                "weekly_cache_stale",
+            )
+
+    log.warning("Event Radar next72: empty raw=%s note=%s", raw_api, note_api)
+    if is_truly_empty_radar_note(note_api):
+        return [], raw_api, 0, 0, note_api or "api_ok_empty"
+    return [], raw_api, 0, 0, note_api or "api_filter_empty"
 
 
 async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, str | None]:
-    """NOW24 и WEEK из одного normalized pool (event_radar_pipeline)."""
-    from daily_event import select_now24_events, select_nearest_upcoming
-    from event_radar_pipeline import build_master_radar_pool, get_now24_from_pipeline
+    """NOW24: shared master → window 24h → soft filter (без elite rules)."""
+    from event_radar_pipeline import (
+        RadarPipelineStats,
+        apply_window_and_finalize,
+        build_now24_debug_snapshot,
+        count_now24_window_candidates,
+        get_now24_from_pipeline,
+        normalize_radar_event,
+        prepare_master_pool,
+    )
+    from betboom_parser import is_betboom_failure_note
+    from api_sports_status import is_truly_empty_radar_note
     from next24 import log_next24_window_header
     from weekly_events_cache import load_weekly_events_cache
 
     log_next24_window_header()
 
-    final, raw_total, note = await get_now24_from_pipeline()
+    final, raw_total, window_n, note = await get_now24_from_pipeline(
+        include_gemini=False,
+    )
     if final:
-        log.info("Event Radar now24 unified pipeline: %s", len(final))
-        return final, raw_total, raw_total, len(final), note or "api_unified"
+        log.info("Event Radar now24 pipeline: %s note=%s", len(final), note)
+        note_out = note or (
+            "betboom_unified" if (note or "").startswith("betboom") else "api_unified"
+        )
+        return final, raw_total, window_n or raw_total, len(final), note_out
 
+    source_failed = is_betboom_failure_note(note)
     cached = await load_weekly_events_cache()
     if cached:
-        final = select_now24_events(cached)
+        import event_radar_pipeline as erp
+
+        norm = [normalize_radar_event(dict(x)) for x in cached]
+        norm = [x for x in norm if x]
+        master_cache = prepare_master_pool(norm)
+        wn = count_now24_window_candidates(master_cache)
+        cstats = RadarPipelineStats(
+            raw_found=len(cached), after_normalize=len(master_cache)
+        )
+        final, win_stats = apply_window_and_finalize(
+            master_cache,
+            "now24",
+            stats_label="radar_now24_cache",
+            collect_stats=cstats,
+        )
+        erp._last_now24_debug = build_now24_debug_snapshot(
+            win_stats, master=master_cache
+        )
         if final:
-            log.info("Event Radar now24 from cache slice: %s", len(final))
-            return final, len(cached), len(cached), len(final), "weekly_cache"
-        if len(cached) > 0:
-            return [], len(cached), len(cached), 0, "api_filter_empty"
+            cache_note = (
+                "weekly_cache_api_down" if source_failed else "weekly_cache_pipeline"
+            )
+            log.info("Event Radar now24 from cache (%s): %s", cache_note, len(final))
+            return final, len(cached), wn, len(final), cache_note
 
-    master, _ = await build_master_radar_pool(stats_label="radar_now24_retry")
-    if master:
-        final = select_now24_events(master)
-        if final:
-            return final, len(master), len(master), len(final), "api_unified"
-
-    pool, raw_total, prelim, fetch_note = await _fetch_radar_pipeline()
-    final = select_now24_events(pool)
-    if final:
-        return final, raw_total, len(prelim), len(final), fetch_note
-
-    if cached:
-        upcoming = select_nearest_upcoming(cached, within_days=2)
-        final = select_now24_events(upcoming)
-        if final:
-            return final, len(cached), len(cached), len(final), "weekly_cache_upcoming"
-
-    log.info("Event Radar now24: empty raw=%s pool=%s", raw_total, len(pool))
-    return [], raw_total, len(prelim), 0, fetch_note
+    log.info("Event Radar now24: empty raw=%s window=%s note=%s", raw_total, window_n, note)
+    if source_failed:
+        return [], raw_total, window_n, 0, note
+    if is_truly_empty_radar_note(note):
+        return [], raw_total, window_n, 0, note or "api_window_empty"
+    return [], raw_total, window_n, 0, note or "api_filter_empty"
 
 
 def format_radar_afisha(
@@ -1391,15 +1387,20 @@ def format_radar_afisha(
     )
 
 
-def format_radar_week_message(events: list[dict[str, Any]]) -> str:
+def format_radar_next72_message(events: list[dict[str, Any]]) -> str:
     from event_radar_pipeline import enrich_events_for_display, sort_events_chronological
 
     sorted_ev = enrich_events_for_display(sort_events_chronological(events))
     body = format_radar_afisha(
         sorted_ev,
-        section_title="🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
+        section_title="🔥 АФИША НА 3 ДНЯ В GASTROBAR",
     )
-    return f"🔭 Event Radar · Week\n\n{body}"
+    return f"🔥 Event Radar · Афиша на 3 дня\n\n{body}"
+
+
+def format_radar_week_message(events: list[dict[str, Any]]) -> str:
+    """Legacy alias."""
+    return format_radar_next72_message(events)
 
 
 def format_radar_now24_message(events: list[dict[str, Any]]) -> str:
@@ -1450,14 +1451,23 @@ def radar_fetch_header(
     if fetch_note == "sports_fallback":
         return "🔭 Event Radar · API-SPORTS (резерв)\nЛимит Gemini исчерпан."
     if fetch_note == "weekly_cache":
-        return "⚡ Event Radar · Next 24h\nИсточник: афиша недели (кэш)."
+        return "⚡ Event Radar · Next 24h\nИсточник: сохранённая афиша (кэш)."
+    if fetch_note in ("api_gemini_unified",):
+        return "🔭 Event Radar · API-SPORTS + Gemini Search (scout)\nПравила Python — финальный список."
     if fetch_note == "weekly_cache_today":
-        return (
-            "📦 Афиша из кэша (собрана сегодня).\n"
-            "Новый Gemini Search не вызывался — лимит free tier."
-        )
+        return "📦 Афиша из кэша (собрана сегодня, API + rules)."
+    if fetch_note == "weekly_cache_stale":
+        return "📦 Афиша из кэша (API сейчас пуст — показан последний снимок)."
+    if fetch_note == "weekly_cache_api_down":
+        return "📦 Афиша из кэша (BetBoom недоступен — последний снимок)."
+    if fetch_note in ("betboom_ok", "betboom_cache"):
+        return "📋 Event Radar · BetBoom (линия)"
+    if fetch_note == "betboom_unavailable":
+        return "⚠️ BetBoom недоступен — показан кэш или резерв API-SPORTS."
+    if fetch_note == "api_sports_fallback":
+        return "📋 Event Radar · API-SPORTS (резерв, BetBoom пуст)"
     if fetch_note == "weekly_cache_quota":
-        return "⚠️ Gemini лимит исчерпан. Показываю последнюю сохранённую афишу."
+        return "📦 Афиша из кэша (резерв)."
     if fetch_note == "api_sports_now24":
         return _now24_api_sports_source_header(events)
     return ""

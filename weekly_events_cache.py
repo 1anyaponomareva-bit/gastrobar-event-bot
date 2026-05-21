@@ -168,13 +168,30 @@ def sanitize_weekly_cache(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     out = dedupe_events(out, log_prefix="weekly_cache_sanitize")
 
-    from radar_current_week import filter_radar_events
+    from event_radar_pipeline import (
+        RadarPipelineStats,
+        filter_low_quality_only,
+        in_time_window,
+        normalize_radar_event,
+        sort_events_chronological,
+    )
 
     before_cw = len(out)
-    out = filter_radar_events(out, phase="weekly_cache", allow_gemini_discovery=True)
+    stats = RadarPipelineStats(label="weekly_cache")
+    kept: list[dict[str, Any]] = []
+    for ev in out:
+        ne = normalize_radar_event(ev)
+        if ne is None:
+            stats.drop("bad_datetime", event=ev)
+            continue
+        if not in_time_window(ne, "next72"):
+            stats.drop("outside_window", event=ne)
+            continue
+        kept.append(ne)
+    out = sort_events_chronological(filter_low_quality_only(kept, stats))
     if len(out) < before_cw:
         log.info(
-            "weekly cache current-week filter: kept=%s dropped=%s",
+            "weekly cache rule filter: kept=%s dropped=%s",
             len(out),
             before_cw - len(out),
         )

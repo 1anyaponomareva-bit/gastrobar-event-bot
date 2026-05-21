@@ -199,15 +199,21 @@ def lock_event_from_api_utc_iso(
     dt_iso: str,
     *,
     phase: str = "api_sports",
+    timestamp: Any = None,
 ) -> dict[str, Any] | None:
     """
-    API-SPORTS fixture.date — authoritative UTC (Z). Один переход UTC → VN.
-    Не вызывать establish_schedule: иначе Europe/London перетолкует 18:30Z как BST wall.
+    API-SPORTS: timestamp (приоритет) или fixture.date ISO (UTC Z).
+    Один переход UTC → VN. Без establish_schedule / Europe/London.
     """
-    dt = parse_datetime_iso(dt_iso)
-    if dt is None:
+    from event_datetime_norm import utc_from_iso, utc_from_timestamp
+
+    utc_aware = None
+    if timestamp is not None and timestamp != "":
+        utc_aware = utc_from_timestamp(timestamp)
+    if utc_aware is None and dt_iso:
+        utc_aware = utc_from_iso(dt_iso)
+    if utc_aware is None:
         return None
-    utc_aware = dt.astimezone(timezone.utc)
     out = dict(event)
     out.update(utc_datetime_to_local_fields(utc_aware))
     out["original_timezone"] = "UTC"
@@ -228,6 +234,30 @@ def lock_event_from_api_utc_iso(
     log_event_debug(out, phase=phase)
     log_datetime_pipeline(out)
     run_sanity_checks(out)
+    return out
+
+
+def lock_event_from_vn_wall_clock(
+    event: dict[str, Any],
+    *,
+    phase: str = "api_sports_vn",
+) -> dict[str, Any] | None:
+    """
+    date/time уже в Asia/Ho_Chi_Minh (после _row_from_api_dt).
+    Не прогонять через NHL/NY trusted_tz.
+    """
+    from event_datetime_norm import apply_normalized_datetime_fields, normalize_event_datetime
+
+    local_dt = normalize_event_datetime(event)
+    if local_dt is None:
+        return None
+    out = apply_normalized_datetime_fields(
+        event, local_dt, utc_authority="api_sports_vn_wall"
+    )
+    from timezone_truth import log_event_debug
+
+    log_event_debug(out, phase=phase)
+    log_datetime_pipeline(out)
     return out
 
 

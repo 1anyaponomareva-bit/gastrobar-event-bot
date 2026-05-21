@@ -43,7 +43,7 @@ from weekly_events_cache import (
 log = logging.getLogger(__name__)
 
 CACHE_EMPTY_MSG = (
-    "Недельная афиша ещё не собрана. Сначала соберите /events → Афиша на неделю, "
+    "Афиша ещё не собрана. Сначала /events → 🔥 Афиша на 3 дня, "
     "или я сделаю быстрый поиск ближайших 24 часов."
 )
 
@@ -247,8 +247,8 @@ async def build_post_from_saved_events(
             ok=False,
             error_code="empty_week",
             error_detail=(
-                "Нет сохранённой недельной афиши. "
-                "Сначала нажмите 📅 Афиша на неделю."
+                "Нет сохранённой афиши на 3 дня. "
+                "Сначала нажмите 🔥 Афиша на 3 дня в /events."
             ),
         )
     from daily_event import enrich_daily_campaign_meta
@@ -430,11 +430,11 @@ async def build_daily_content_package(
             ),
         )
     except Exception as e:
-        log.error("%s unexpected error", log_prefix, exc_info=True)
+        log.exception("%s unexpected error", log_prefix, exc_info=True)
         return DailyBuildResult(
             ok=False,
             error_code="unexpected",
-            error_detail=str(e)[:200] or "unexpected error",
+            error_detail=f"{type(e).__name__}: {str(e)[:500]}",
         )
 
 
@@ -443,7 +443,6 @@ _USER_ERROR_RU = {
     "cache_empty": CACHE_EMPTY_MSG,
     "verification_failed": "Ошибка: verification failed",
     "gemini_text_failed": "Ошибка: Gemini text generation failed",
-    "unexpected": "Ошибка: unexpected error",
 }
 
 
@@ -451,9 +450,10 @@ def user_error_message(result: DailyBuildResult) -> str:
     if result.error_code in _USER_ERROR_RU:
         return _USER_ERROR_RU[result.error_code]
     if result.error_code == "gemini_text_failed":
-        return f"Ошибка: Gemini text generation failed\n({result.error_detail[:120]})"
+        return f"Ошибка: Gemini text generation failed\n({result.error_detail[:500]})"
     if result.error_code == "unexpected":
-        return f"Ошибка: unexpected error\n({result.error_detail[:120]})"
+        detail = result.error_detail or "unknown"
+        return f"Ошибка:\n{detail[:500]}"
     return result.error_detail or "Не удалось сгенерировать пост дня."
 
 
