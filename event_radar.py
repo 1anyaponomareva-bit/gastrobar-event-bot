@@ -823,6 +823,9 @@ def _fetch_radar_multi_search_sharded() -> tuple[list[dict[str, Any]], int, str 
                 prelim, raw, note = fut.result()
             except Exception as e:
                 if _is_gemini_free_quota_error(e):
+                    from gemini_client import disable_gemini_search
+
+                    disable_gemini_search("quota_exhausted")
                     log.error("Event Radar shard %s: Gemini quota: %s", label, e)
                     return [], 0, "gemini_quota"
                 log.error("Gemini Search error", exc_info=True)
@@ -848,12 +851,18 @@ def _fetch_radar_multi_search_sharded() -> tuple[list[dict[str, Any]], int, str 
 
 
 def _fetch_radar_combined_once(*, force_gemini: bool = False) -> tuple[list[dict[str, Any]], int, str | None]:
+    from gemini_client import is_gemini_search_available
     from gemini_usage import should_skip_gemini_discovery_sync
 
     if not GEMINI_API_KEY:
         log.warning("Event Radar: GEMINI_API_KEY missing")
         return [], 0, "gemini_api_key_missing"
-    if not force_gemini and should_skip_gemini_discovery_sync():
+    if not is_gemini_search_available():
+        log.warning("Event Radar: Gemini Search disabled (quota)")
+        return [], 0, "gemini_quota"
+    if not force_gemini:
+        return [], 0, "gemini_search_disabled"
+    if should_skip_gemini_discovery_sync():
         log.warning("Event Radar: skipping Gemini discovery — daily limit guard")
         return [], 0, "gemini_quota"
     max_n = min(max(RADAR_PER_SEARCH_MAX + 8, 36), 42)
@@ -865,6 +874,10 @@ def _fetch_radar_combined_once(*, force_gemini: bool = False) -> tuple[list[dict
         )
     except Exception as e:
         if _is_gemini_free_quota_error(e) or "rate limit guard" in str(e).lower():
+            from gemini_client import disable_gemini_search
+
+            if _is_gemini_free_quota_error(e):
+                disable_gemini_search("quota_exhausted")
             log.error("Event Radar combined: Gemini quota/guard: %s", e)
             return [], 0, "gemini_quota"
         log.error("Gemini Search error", exc_info=True)
@@ -892,6 +905,15 @@ def fetch_radar_multi_search_sync(
     По умолчанию один combined-запрос (1 счётчик generateContent на free tier).
     Несколько шардов — RADAR_MULTI_SHARD=1 (много запросов, только при платном лимите).
     """
+    from gemini_client import disable_gemini_search, is_gemini_search_available
+
+    if not is_gemini_search_available():
+        log.info("GEMINI_SEARCH_DISABLED_REASON=quota_exhausted — skip fetch_radar_multi_search")
+        return [], 0, "gemini_quota"
+    if not force_gemini:
+        log.info("GEMINI_SEARCH_DISABLED_REASON=discovery_disabled — skip multi_search")
+        return [], 0, "gemini_search_disabled"
+
     flag = os.getenv("RADAR_MULTI_SHARD", "").strip().lower()
     if flag in ("1", "true", "yes", "on"):
         log.info("Event Radar: RADAR_MULTI_SHARD enabled — multiple Gemini calls")

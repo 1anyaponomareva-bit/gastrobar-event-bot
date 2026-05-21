@@ -81,8 +81,10 @@ def _radar_log_context(mode: str) -> str:
     return "NOW24 unexpected error" if mode == "now24" else "WEEK unexpected error"
 
 router = Router()
-# Event Radar (Gemini + Google Search) может занять дольше, чем спортивный API.
-WEEK_FETCH_TIMEOUT_SEC = 240.0
+from config import EVENT_RADAR_TIMEOUT_SEC
+
+# Event Radar: BetBoom-first, без Gemini Search discovery (лимит 30 с)
+WEEK_FETCH_TIMEOUT_SEC = EVENT_RADAR_TIMEOUT_SEC
 last_draft_state: dict[int, dict[str, Any]] = {}
 last_week_events: dict[int, list[dict[str, Any]]] = {}
 last_now24_events: dict[int, list[dict[str, Any]]] = {}
@@ -458,17 +460,40 @@ async def _run_radar_mode(
                     timeout=WEEK_FETCH_TIMEOUT_SEC,
                 )
             except asyncio.TimeoutError:
-                from runtime_messages import event_radar_error_message
+                from runtime_messages import (
+                    build_tag_line,
+                    event_radar_error_message,
+                    format_event_radar_sources_unavailable_message,
+                )
+                from weekly_events_cache import get_weekly_events_cache_for_display
 
                 logger.warning(
-                    "radar:%s timeout after %.0fs user_id=%s",
+                    "EVENT_RADAR_TIMEOUT_PREVENTED=true radar:%s timeout after %.0fs user_id=%s",
                     mode,
                     time.monotonic() - t0,
                     user_id,
                 )
+                if mode == "next72":
+                    cached = await get_weekly_events_cache_for_display()
+                    if cached:
+                        try:
+                            await status_msg.delete()
+                        except Exception:
+                            logger.exception("status_msg.delete failed", exc_info=True)
+                        await _deliver_weekly_cache(
+                            message,
+                            user_id,
+                            cached,
+                            header=(
+                                f"📦 Афиша из кэша ({len(cached)} событий).\n"
+                                f"⏱ Поиск прерван через {int(WEEK_FETCH_TIMEOUT_SEC)} с."
+                            ),
+                        )
+                        return
                 await status_msg.edit_text(
-                    f"⏱ Поиск занял больше {int(WEEK_FETCH_TIMEOUT_SEC // 60)} мин.\n\n"
-                    + event_radar_error_message("timeout")
+                    f"⏱ Поиск прерван через {int(WEEK_FETCH_TIMEOUT_SEC)} с.\n\n"
+                    + format_event_radar_sources_unavailable_message()
+                    + f"\n\n{build_tag_line()}"
                 )
                 return
             except Exception as exc:
@@ -990,20 +1015,11 @@ async def cmd_api_status(message: Message) -> None:
 
 @router.message(Command("check"))
 async def cmd_check(message: Message) -> None:
-    telegram_line = "✅ Telegram API connected"
+    from api_checks import run_connectivity_check
+
     async with show_typing(message.bot, message.chat.id):
-        gemini, sports = await asyncio.gather(check_gemini(), check_sports_api())
-    lines = [telegram_line]
-    lines.append(
-        ("✅ " if gemini.ok else "❌ ")
-        + "Gemini API "
-        + ("connected" if gemini.ok else (gemini.details or "error"))
-    )
-    lines.append(
-        ("✅ " if sports.ok else "❌ ")
-        + "API-SPORTS "
-        + ("connected" if sports.ok else (sports.details or "error"))
-    )
+        body = await run_connectivity_check()
+    lines = ["✅ Telegram API connected", ""] + body.split("\n")
     await message.answer("\n".join(lines))
 
 

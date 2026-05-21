@@ -154,3 +154,9 @@ RADAR_GEMINI_DISCOVERY: bool = os.getenv("RADAR_GEMINI_DISCOVERY", "0").strip().
     "yes",
     "on",
 )
+
+# Event Radar: общий лимит ожидания (сек), не 4 минуты
+EVENT_RADAR_TIMEOUT_SEC: float = float(os.getenv("EVENT_RADAR_TIMEOUT_SEC", "30") or "30")
+# BetBoom ingest внутри pipeline (Playwright)
+BETBOOM_FETCH_TIMEOUT_SEC: float = float(os.getenv("BETBOOM_FETCH_TIMEOUT_SEC", "25") or "25")
+BETBOOM_PAGE_TIMEOUT_MS: int = int(os.getenv("BETBOOM_PAGE_TIMEOUT_MS", "12000") or "12000")

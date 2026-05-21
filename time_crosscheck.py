@@ -97,7 +97,10 @@ def _quota_circuit_open() -> bool:
 
 def _trip_quota_circuit(exc: BaseException | None = None) -> None:
     global _quota_open_until
+    from gemini_client import disable_gemini_search
+
     _quota_open_until = time.monotonic() + _QUOTA_COOLDOWN_SEC
+    disable_gemini_search("quota_exhausted")
     log.warning(
         "time_crosscheck: Gemini quota circuit open %.0fs (%s)",
         _QUOTA_COOLDOWN_SEC,

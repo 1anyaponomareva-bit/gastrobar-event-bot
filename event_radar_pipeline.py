@@ -682,6 +682,12 @@ async def collect_all_events(
     stats = RadarPipelineStats(label=f"radar_collect_{days_ahead}d")
     raw, fetch_note, _raw_n = await merge_betboom_with_api_fallback(days_ahead=days_ahead)
     stats.api_fetch_note = fetch_note
+    source = fetch_note or "betboom"
+    if fetch_note == "betboom_cache":
+        source = "cache"
+    elif fetch_note == "api_sports_fallback":
+        source = "api"
+    log.info("EVENT_RADAR_SOURCE_SELECTED=%s raw=%s", source, len(raw))
     if fetch_note in ("betboom_unavailable", "betboom_parse_error") and not raw:
         stats.raw_found = 0
         stats.flush(suffix="_BETBOOM_FAIL")
@@ -759,10 +765,24 @@ async def collect_gemini_discovery(
     force_gemini: bool = False,
     stats: RadarPipelineStats | None = None,
 ) -> tuple[list[dict[str, Any]], int, str | None]:
-    """Gemini Search scout — без strict verify / API match."""
+    """Gemini Search scout — отключён при quota / RADAR_GEMINI_DISCOVERY=0."""
     import asyncio
 
+    from config import RADAR_GEMINI_DISCOVERY
+    from gemini_client import gemini_search_disabled_reason, is_gemini_search_available
+
     st = stats or RadarPipelineStats(label="radar_gemini")
+    if not RADAR_GEMINI_DISCOVERY:
+        log.info("GEMINI_SEARCH_DISABLED_REASON=RADAR_GEMINI_DISCOVERY=0")
+        return [], 0, "gemini_search_disabled"
+    if not is_gemini_search_available():
+        reason = gemini_search_disabled_reason() or "quota_exhausted"
+        log.info("GEMINI_SEARCH_DISABLED_REASON=%s", reason)
+        return [], 0, "gemini_quota"
+    if not force_gemini:
+        log.info("GEMINI_SEARCH_DISABLED_REASON=discovery_not_forced")
+        return [], 0, "gemini_search_disabled"
+
     try:
         from event_radar import fetch_radar_multi_search_sync
 
@@ -828,8 +848,15 @@ async def build_normalized_radar_pool(
     merged: list[dict[str, Any]] = list(locked)
     gemini_note: str | None = None
     from config import RADAR_GEMINI_DISCOVERY
+    from gemini_client import is_gemini_search_available
 
-    if include_gemini and RADAR_GEMINI_DISCOVERY:
+    allow_gemini = (
+        include_gemini
+        and RADAR_GEMINI_DISCOVERY
+        and is_gemini_search_available()
+        and force_gemini
+    )
+    if allow_gemini:
         gemini_events, _gem_raw, gemini_note = await collect_gemini_discovery(
             force_gemini=force_gemini,
             stats=stats,
@@ -847,8 +874,13 @@ async def build_normalized_radar_pool(
                 len(merged),
                 gemini_note,
             )
-    elif include_gemini:
-        log.info("RADAR Gemini discovery disabled (RADAR_GEMINI_DISCOVERY=0)")
+    else:
+        log.info(
+            "RADAR Gemini discovery skipped (include=%s RADAR_GEMINI_DISCOVERY=%s search_ok=%s)",
+            include_gemini,
+            RADAR_GEMINI_DISCOVERY,
+            is_gemini_search_available(),
+        )
 
     normalized: list[dict[str, Any]] = []
     for e in merged:

@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 # Меняйте при деплое — по этой метке видно, какой код ответил в Telegram.
 
-BOT_BUILD_ID = "event-radar-menu-3d-not-week-20260520b"
+BOT_BUILD_ID = "event-radar-no-gemini-search-20260522"
 
 
 
@@ -43,6 +43,9 @@ _RADAR_REASON_RU: dict[str, str] = {
     "gemini_api_key_missing": "Gemini API key missing",
 
     "gemini_search_failed": "Gemini search failed",
+    "gemini_search_disabled": "Gemini Search disabled",
+    "gemini_quota": "Gemini Search quota exhausted",
+    "sources_unavailable": "sources unavailable",
 
     "gemini_overloaded": "Gemini overloaded (503) — retry in 1–2 min",
 
@@ -87,6 +90,8 @@ _FETCH_NOTE_TO_CODE: dict[str, str] = {
     "betboom_cache": "api_ok_empty",
     "betboom_unavailable": "betboom_unavailable",
     "betboom_parse_error": "betboom_parse_error",
+    "gemini_quota": "gemini_quota",
+    "gemini_search_disabled": "gemini_search_disabled",
     "api_sports_fallback": "api_filter_empty",
 
     "now24_emergency": "api_filter_empty",
@@ -211,6 +216,23 @@ def event_radar_error_message(
 
             f"{runtime_logs_hint()}"
 
+        )
+
+    elif reason in ("gemini_quota", "gemini_search_disabled", "gemini_search_failed"):
+        from gemini_client import gemini_search_quota_message
+
+        body = gemini_search_quota_message() + (
+            "\n\nEvent Radar использует BetBoom и кэш, не Gemini Search."
+        )
+
+    elif reason == "sources_unavailable":
+        body = format_event_radar_sources_unavailable_message()
+
+    elif reason == "timeout":
+        body = (
+            "Поиск событий прерван по таймауту (30 с).\n"
+            "Показан кэш, если он есть.\n\n"
+            + format_event_radar_sources_unavailable_message()
         )
 
     else:
@@ -417,14 +439,44 @@ def format_now24_empty_message(
 
 
 
+def format_event_radar_sources_unavailable_message() -> str:
+    """Сводка при недоступности BetBoom + API + исчерпанной квоте Search."""
+    from api_sports_status import get_last_sport_status
+    from gemini_client import (
+        gemini_search_quota_message,
+        is_gemini_search_available,
+    )
+
+    parts = ["Источник событий сейчас недоступен."]
+    if not is_gemini_search_available():
+        parts.append(gemini_search_quota_message())
+    st = get_last_sport_status()
+    api_bad = any(
+        str(v).split(":")[0] in ("suspended", "rateLimit", "unavailable")
+        for v in (st or {}).values()
+    )
+    if api_bad:
+        parts.append("API-Sports: suspended или rateLimit.")
+    elif not st:
+        parts.append("API-Sports: статус неизвестен (fallback выключен или не проверялся).")
+    else:
+        parts.append("API-Sports: fallback отключён (BETBOOM_API_FALLBACK=0).")
+    parts.append("BetBoom: линия не загружена или таймаут парсера.")
+    return "\n".join(parts)
+
+
 def gemini_test_error_message(exc: BaseException | None = None) -> str:
+    from gemini_client import gemini_search_quota_message, is_gemini_quota_error
 
+    if exc is not None and is_gemini_quota_error(exc):
+        return (
+            "Ошибка при /gemini_test.\n\n"
+            + gemini_search_quota_message()
+            + f"\n\n{build_tag_line()}"
+        )
     base = f"Ошибка при /gemini_test.\n\n{troubleshoot_footer()}"
-
     if exc is not None:
-
         return f"{base}\n\n{format_telegram_exception(exc)}"
-
     return base
 
 
@@ -463,9 +515,10 @@ def resolve_radar_error_code(
 
     if exception is not None:
 
-        from gemini_client import is_gemini_transient_error
+        from gemini_client import is_gemini_quota_error, is_gemini_transient_error
 
-
+        if is_gemini_quota_error(exception):
+            return "gemini_quota"
 
         if is_gemini_transient_error(exception):
 

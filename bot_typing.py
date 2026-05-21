@@ -54,13 +54,11 @@ async def _edit_status_safe(msg: Message, text: str) -> None:
 
 
 async def radar_search_progress(status_msg: Message, label: str) -> None:
-    """Обновляет статусное сообщение, пока идёт долгий поиск."""
+    """Обновляет статусное сообщение (Event Radar ≤30 с, без Gemini Search)."""
     steps = [
-        (12, f"🔍 Ищу: {label}\n✍️ Бот печатает…"),
-        (28, f"🔍 Gemini Search…\n✍️ Бот печатает · ~30 сек"),
-        (50, f"🔍 Проверяю даты и время…\n✍️ Бот печатает · ~1 мин"),
-        (80, f"🔍 Фильтр для бара…\n✍️ Бот печатает · ~1.5 мин"),
-        (115, f"🔍 Почти готово…\n✍️ Бот печатает · подождите ещё немного"),
+        (8, f"🔍 Ищу: {label}\n✍️ BetBoom линия…"),
+        (18, f"🔍 Фильтр времени (VN)…\n✍️ ~30 сек"),
+        (26, f"🔍 Почти готово…\n✍️ подождите"),
     ]
     for delay, text in steps:
         await asyncio.sleep(delay)

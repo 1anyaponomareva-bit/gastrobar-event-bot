@@ -25,7 +25,9 @@ import httpx
 from config import (
     BETBOOM_API_FALLBACK,
     BETBOOM_BASE_URL,
+    BETBOOM_FETCH_TIMEOUT_SEC,
     BETBOOM_JSON_URL,
+    BETBOOM_PAGE_TIMEOUT_MS,
     BETBOOM_SITE_API,
     BETBOOM_USE_PLAYWRIGHT,
     TIMEZONE,
@@ -359,8 +361,12 @@ def _playwright_fetch_sync(*, days_ahead: int) -> list[dict[str, Any]]:
         for _sp, slug in SPORT_PAGES:
             url = f"{BETBOOM_BASE_URL}/sport/{slug}"
             try:
-                page.goto(url, wait_until="networkidle", timeout=45_000)
-                page.wait_for_timeout(1500)
+                page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=BETBOOM_PAGE_TIMEOUT_MS,
+                )
+                page.wait_for_timeout(800)
             except Exception as exc:
                 log.warning("BETBOOM_PARSE_ERROR page=%s: %s", slug, exc)
         browser.close()
@@ -376,9 +382,44 @@ async def fetch_betboom_line(*, days_ahead: int = 3) -> BetBoomFetchResult:
     Основной ingest BetBoom (до 3 календарных дней, VN).
     При ошибке — cache; опционально API-SPORTS fallback снаружи.
     """
+    log.info("BETBOOM_FETCH_STARTED days_ahead=%s", days_ahead)
+    try:
+        return await asyncio.wait_for(
+            _fetch_betboom_line_inner(days_ahead=days_ahead),
+            timeout=BETBOOM_FETCH_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "EVENT_RADAR_TIMEOUT_PREVENTED=true BETBOOM_FETCH timeout after %.0fs",
+            BETBOOM_FETCH_TIMEOUT_SEC,
+        )
+        return await _betboom_timeout_result(days_ahead=days_ahead)
+
+
+async def _betboom_timeout_result(*, days_ahead: int) -> BetBoomFetchResult:
+    from betboom_cache import load_betboom_cache
+
+    result = BetBoomFetchResult(events=[], fetch_note=None)
+    cached = await load_betboom_cache(allow_stale=True)
+    if cached:
+        filtered = filter_betboom_events(
+            [e for e in cached if _in_days_window(e, days_ahead=days_ahead)]
+        )
+        result.events = filtered
+        result.filtered_found = len(filtered)
+        result.fetch_note = _FETCH_NOTE_CACHE
+        result.used_cache = True
+        result.errors = [f"timeout:{BETBOOM_FETCH_TIMEOUT_SEC}s"]
+        log.info("BETBOOM_CACHE_USED after timeout events=%s", len(filtered))
+        return result
+    result.fetch_note = _FETCH_NOTE_UNAVAILABLE
+    result.errors = [f"timeout:{BETBOOM_FETCH_TIMEOUT_SEC}s"]
+    return result
+
+
+async def _fetch_betboom_line_inner(*, days_ahead: int = 3) -> BetBoomFetchResult:
     from betboom_cache import load_betboom_cache, save_betboom_cache
 
-    log.info("BETBOOM_FETCH_STARTED days_ahead=%s", days_ahead)
     result = BetBoomFetchResult(events=[], fetch_note=None)
     raw: list[dict[str, Any]] = []
     errors: list[str] = []

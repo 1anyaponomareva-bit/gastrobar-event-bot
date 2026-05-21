@@ -24,6 +24,36 @@ _SEARCH_TEST_PROMPT = (
     "Reply with JSON only: {\"ok\": true, \"date\": \"YYYY-MM-DD\"}"
 )
 
+# Сессия процесса: после 429 на Search — не вызывать grounding до рестарта
+_gemini_search_available: bool = True
+_gemini_search_disabled_reason: str | None = None
+
+
+def is_gemini_search_available() -> bool:
+    return _gemini_search_available
+
+
+def gemini_search_disabled_reason() -> str | None:
+    return _gemini_search_disabled_reason
+
+
+def disable_gemini_search(reason: str = "quota_exhausted") -> None:
+    global _gemini_search_available, _gemini_search_disabled_reason
+    if _gemini_search_available:
+        _gemini_search_available = False
+        _gemini_search_disabled_reason = reason
+        log.warning(
+            "GEMINI_SEARCH_AVAILABLE=false GEMINI_SEARCH_DISABLED_REASON=%s",
+            reason,
+        )
+
+
+def gemini_search_quota_message() -> str:
+    return (
+        "Gemini Search quota exhausted. Обычный Gemini работает, "
+        "но поиск событий через grounding временно недоступен."
+    )
+
 
 @dataclass(slots=True)
 class GeminiCallResult:
@@ -33,6 +63,7 @@ class GeminiCallResult:
     error_class: str | None = None
     error_message: str | None = None
     response_body: str | None = None
+    quota_exhausted: bool = False
 
 
 @dataclass(slots=True)
@@ -54,11 +85,18 @@ class GeminiTestReport:
         ]
         if not self.plain.ok and self.plain.error_message:
             lines.append("")
-            lines.append(f"plain: {self.plain.error_class}: {self._short(self.plain.error_message)}")
-        if not self.search.ok and self.search.error_message:
             lines.append(
-                f"search: {self.search.error_class}: {self._short(self.search.error_message)}"
+                f"plain: {self.plain.error_class}: {self._short(self.plain.error_message)}"
             )
+        if not self.search.ok:
+            if self.search.quota_exhausted:
+                lines.append("")
+                lines.append(gemini_search_quota_message())
+            elif self.search.error_message:
+                lines.append(
+                    f"search: {self.search.error_class}: "
+                    f"{self._short(self.search.error_message)}"
+                )
         return "\n".join(lines)
 
     @staticmethod
@@ -66,6 +104,8 @@ class GeminiTestReport:
         if r.ok:
             extra = f" ({r.preview})" if r.preview else ""
             return f"✅ {title} работает{extra}"
+        if r.quota_exhausted:
+            return f"❌ {title} — quota_exhausted"
         return f"❌ {title} — ошибка"
 
     @staticmethod
@@ -136,7 +176,7 @@ def is_gemini_transient_error(exc: BaseException) -> bool:
 
 
 def is_gemini_quota_error(exc: BaseException) -> bool:
-    """429 / free tier daily limit — не отбрасывать события, пропустить лишние вызовы."""
+    """429 / free tier daily limit — fail-fast для Search, без retry."""
     t = str(exc)
     tl = t.lower()
     return (
@@ -154,6 +194,11 @@ def _generate_sync(
     use_search: bool,
     max_retries: int = 5,
 ) -> str:
+    if use_search and not _gemini_search_available:
+        raise RuntimeError(
+            f"Gemini Search disabled ({_gemini_search_disabled_reason or 'disabled'})"
+        )
+
     client = genai.Client(api_key=GEMINI_API_KEY)
     model = effective_gemini_model()
     config = None
@@ -175,6 +220,12 @@ def _generate_sync(
             return text
         except Exception as e:
             last_err = e
+            if use_search and is_gemini_quota_error(e):
+                disable_gemini_search("quota_exhausted")
+                log.warning(
+                    "GEMINI_SEARCH_DISABLED_REASON=quota_exhausted — fail fast, no retry"
+                )
+                raise
             if attempt >= max_retries or not is_gemini_transient_error(e):
                 raise
             delay = min(45.0, 5.0 * (2 ** (attempt - 1)))
@@ -193,14 +244,24 @@ def _generate_sync(
 
 def _run_call(label: str, *, use_search: bool) -> GeminiCallResult:
     prompt = _SEARCH_TEST_PROMPT if use_search else _TEST_PROMPT
+    max_retries = 1 if use_search else 3
     try:
-        text = _generate_sync(contents=prompt, use_search=use_search)
+        text = _generate_sync(
+            contents=prompt,
+            use_search=use_search,
+            max_retries=max_retries,
+        )
         preview = text[:80].replace("\n", " ")
         log.info("Gemini %s ok: %s", label, preview)
         return GeminiCallResult(ok=True, label=label, preview=preview)
     except Exception as e:
         summary = log_gemini_error(label, e)
-        if use_search:
+        quota = use_search and (
+            is_gemini_quota_error(e) or not _gemini_search_available
+        )
+        if use_search and quota:
+            log.warning("Gemini Search probe: quota_exhausted (no retry)")
+        elif use_search:
             log.error("Gemini Search error", exc_info=True)
         return GeminiCallResult(
             ok=False,
@@ -208,6 +269,7 @@ def _run_call(label: str, *, use_search: bool) -> GeminiCallResult:
             error_class=type(e).__name__,
             error_message=str(e),
             response_body=extract_response_body(e),
+            quota_exhausted=quota,
         )
 
 
@@ -250,12 +312,27 @@ def generate_radar_content_sync(
     use_search: bool,
     purpose: str = "radar",
 ) -> str:
-    """Один вызов generateContent для Event Radar (с RPM/RPD guard)."""
+    """Один вызов generateContent. Search запрещён при quota / RADAR_GEMINI_DISCOVERY=0."""
+    if use_search:
+        if not _gemini_search_available:
+            raise RuntimeError(
+                f"Gemini Search disabled: {_gemini_search_disabled_reason or 'disabled'}"
+            )
+        from config import RADAR_GEMINI_DISCOVERY
+
+        if not RADAR_GEMINI_DISCOVERY:
+            raise RuntimeError("Gemini Search discovery disabled (RADAR_GEMINI_DISCOVERY=0)")
+
     from gemini_usage import can_make_gemini_call_sync, record_gemini_call_sync
 
     ok, reason = can_make_gemini_call_sync(purpose=purpose)
     if not ok:
         raise RuntimeError(f"Gemini rate limit guard: {reason}")
-    text = _generate_sync(contents=prompt, use_search=use_search)
+    max_retries = 1 if use_search else 5
+    text = _generate_sync(
+        contents=prompt,
+        use_search=use_search,
+        max_retries=max_retries,
+    )
     record_gemini_call_sync(purpose)
     return text
