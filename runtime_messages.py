@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 # Меняйте при деплое — по этой метке видно, какой код ответил в Telegram.
 
-BOT_BUILD_ID = "event-radar-betboom-ws-20260522b"
+BOT_BUILD_ID = "event-radar-betboom-json-20260522c"
 
 
 
@@ -87,7 +87,9 @@ _FETCH_NOTE_TO_CODE: dict[str, str] = {
 
     "weekly_cache_stale": "no_candidates",
     "betboom_ok": "api_ok_empty",
+    "betboom_json_ok": "api_ok_empty",
     "betboom_cache": "api_ok_empty",
+    "betboom_json_auth": "betboom_parse_error",
     "betboom_unavailable": "betboom_unavailable",
     "betboom_parse_error": "betboom_parse_error",
     "betboom_empty_line": "betboom_parse_error",

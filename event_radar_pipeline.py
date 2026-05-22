@@ -703,9 +703,11 @@ async def collect_all_events(
         stats.flush(suffix="_API_FAIL")
         return [], 0, stats, fetch_note
 
-    use_betboom_lock = fetch_note in ("betboom_ok", "betboom_cache") or (
-        bool(fetch_note) and str(fetch_note).startswith("betboom")
-    )
+    use_betboom_lock = fetch_note in (
+        "betboom_ok",
+        "betboom_cache",
+        "betboom_json_ok",
+    ) or (bool(fetch_note) and str(fetch_note).startswith("betboom"))
     stats.raw_found = len(raw)
     stats.count_raw_sports(raw)
     stats.flush(suffix="_RAW")

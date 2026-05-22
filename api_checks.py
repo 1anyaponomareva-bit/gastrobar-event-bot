@@ -142,8 +142,14 @@ async def check_api_sports() -> ComponentStatus:
 
 async def check_betboom_parser() -> ComponentStatus:
     from betboom_cache import load_betboom_cache
-    from config import BETBOOM_USE_PLAYWRIGHT
+    from config import BETBOOM_JSON_URL, BETBOOM_USE_PLAYWRIGHT
 
+    if BETBOOM_JSON_URL:
+        return ComponentStatus(
+            "BetBoom parser",
+            "json",
+            f"BETBOOM_JSON_URL set · use /debug_betboom_json",
+        )
     cached = await load_betboom_cache(allow_stale=True)
     if cached:
         return ComponentStatus(
@@ -155,7 +161,7 @@ async def check_betboom_parser() -> ComponentStatus:
         return ComponentStatus(
             "BetBoom parser",
             "ok",
-            "no cache yet (Playwright off)",
+            "no cache · set BETBOOM_JSON_URL",
         )
     return ComponentStatus(
         "BetBoom parser",

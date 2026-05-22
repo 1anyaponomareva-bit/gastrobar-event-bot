@@ -1,5 +1,5 @@
 """
-BetBoom-first: парсинг линии (Playwright network capture + optional JSON URL).
+BetBoom-first: BETBOOM_JSON_URL (HTTP GET) или Playwright fallback.
 
 Логи:
   BETBOOM_FETCH_STARTED
@@ -28,9 +28,9 @@ from config import (
     BETBOOM_FETCH_TIMEOUT_SEC,
     BETBOOM_JSON_URL,
     BETBOOM_PAGE_TIMEOUT_MS,
-    BETBOOM_SITE_API,
     BETBOOM_USE_PLAYWRIGHT,
     TIMEZONE,
+    betboom_json_headers,
 )
 
 log = logging.getLogger(__name__)
@@ -60,6 +60,8 @@ _FETCH_NOTE_CACHE = "betboom_cache"
 _FETCH_NOTE_UNAVAILABLE = "betboom_unavailable"
 _FETCH_NOTE_PARSE_ERROR = "betboom_parse_error"
 _FETCH_NOTE_EMPTY = "betboom_empty_line"
+_FETCH_NOTE_JSON_OK = "betboom_json_ok"
+_FETCH_NOTE_JSON_AUTH = "betboom_json_auth"
 
 # Приоритетные виды спорта (укладываемся в BETBOOM_FETCH_TIMEOUT_SEC)
 PLAYWRIGHT_SPORT_SLUGS: tuple[tuple[str, str], ...] = (
@@ -80,6 +82,18 @@ class BetBoomFetchResult:
     errors: list[str] = field(default_factory=list)
 
 
+@dataclass
+class BetBoomJsonProbeResult:
+    url_set: bool
+    status_code: int | None = None
+    content_type: str = ""
+    root_keys: list[str] = field(default_factory=list)
+    raw_events: list[dict[str, Any]] = field(default_factory=list)
+    error: str | None = None
+    body_preview: str = ""
+    auth_required: bool = False
+
+
 def _today_vn() -> date:
     return datetime.now(VN_TZ).date()
 
@@ -89,6 +103,35 @@ def _event_blob(e: dict[str, Any]) -> str:
         str(e.get(k, ""))
         for k in ("title", "league", "sport", "home", "away", "subtitle")
     ).lower()
+
+
+def _parse_betboom_wall_datetime(ts: Any) -> datetime | None:
+    """
+    Время из BetBoom JSON: уже локальное (VN). Без повторной конвертации UTC→VN.
+    Строка с Z/+offset: берём «настенные» часы, tz = Asia/Ho_Chi_Minh.
+    """
+    if ts is None or ts == "":
+        return None
+    if isinstance(ts, (int, float)):
+        val = float(ts)
+        if val > 1e12:
+            val /= 1000.0
+        return datetime.fromtimestamp(val, tz=VN_TZ)
+    s = str(ts).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1]
+    m_off = re.search(r"^(.+?)[+-]\d{2}:?\d{2}$", s)
+    if m_off:
+        s = m_off.group(1)
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    return dt.replace(tzinfo=VN_TZ)
 
 
 def _parse_local_datetime(date_s: str, time_s: str) -> datetime | None:
@@ -143,6 +186,56 @@ def _extract_title_teams(title: str) -> tuple[str, str, str]:
         home, away = m.group(1).strip(), m.group(2).strip()
         return f"{home} — {away}", home, away
     return title.strip(), "", ""
+
+
+def _participants_str(home: str, away: str, title: str) -> str:
+    if home and away:
+        return f"{home} — {away}"
+    return title.strip()
+
+
+def _build_betboom_event(
+    *,
+    sport: str,
+    title: str,
+    league: str,
+    home: str = "",
+    away: str = "",
+    local_dt: datetime | None = None,
+    source_url: str = "",
+    date_s: str = "",
+    time_s: str = "",
+) -> dict[str, Any] | None:
+    title = title.strip()
+    if not title:
+        return None
+    if not home and not away:
+        title, home, away = _extract_title_teams(title)
+    if local_dt is None:
+        local_dt = _parse_local_datetime(date_s, time_s)
+    if local_dt is None and sport != "formula1":
+        return None
+    blob = f"{title} {league}".lower()
+    sport = _normalize_sport(sport, blob)
+    participants = _participants_str(home, away, title)
+    row: dict[str, Any] = {
+        "sport": sport,
+        "league": league.strip() or sport,
+        "title": title,
+        "participants": participants,
+        "home": home,
+        "away": away,
+        "date": date_s,
+        "time": time_s,
+        "source": "BetBoom",
+        "source_url": source_url or BETBOOM_BASE_URL,
+        "importance": "medium",
+    }
+    if local_dt is not None:
+        row["local_datetime"] = local_dt.isoformat()
+        row["date"] = local_dt.date().isoformat()
+        row["time"] = local_dt.strftime("%H:%M")
+    return row
 
 
 def _coerce_event(
@@ -202,8 +295,92 @@ def _team_name(val: Any) -> str:
     return ""
 
 
+def _event_from_json_dict(
+    d: dict[str, Any],
+    *,
+    page_sport: str,
+    page_url: str,
+) -> dict[str, Any] | None:
+    """Парсинг записи из BETBOOM_JSON_URL (время = VN wall)."""
+    sport = str(d.get("sport") or page_sport or "").strip()
+    title = str(d.get("title") or d.get("name") or d.get("eventName") or "").strip()
+    home = _team_name(
+        d.get("home")
+        or d.get("homeTeam")
+        or d.get("team1")
+        or d.get("competitor1")
+        or d.get("firstParticipant")
+    )
+    away = _team_name(
+        d.get("away")
+        or d.get("awayTeam")
+        or d.get("team2")
+        or d.get("competitor2")
+        or d.get("secondParticipant")
+    )
+    parts = d.get("participants")
+    if isinstance(parts, str) and parts.strip():
+        if not home and not away:
+            t, h, a = _extract_title_teams(parts.strip())
+            if h or a:
+                title, home, away = t, h, a
+            elif not title:
+                title = parts.strip()
+    elif isinstance(parts, (list, tuple)) and len(parts) >= 2:
+        if not home:
+            home = _team_name(parts[0])
+        if not away:
+            away = _team_name(parts[1])
+    league = str(
+        d.get("league")
+        or d.get("tournament")
+        or d.get("championship")
+        or d.get("competition")
+        or ""
+    )
+    if isinstance(league, dict):
+        league = str(league.get("name") or league.get("title") or "")
+
+    local_dt: datetime | None = None
+    if d.get("local_datetime"):
+        try:
+            raw_ld = str(d["local_datetime"])
+            local_dt = _parse_betboom_wall_datetime(raw_ld)
+        except (ValueError, TypeError):
+            local_dt = None
+
+    ts = (
+        d.get("startTime")
+        or d.get("start_time")
+        or d.get("start")
+        or d.get("kickoff")
+        or d.get("startAt")
+        or d.get("dateTime")
+        or d.get("matchTime")
+    )
+    date_s = str(d.get("date") or "")[:10]
+    time_s = str(d.get("time") or "")
+    if local_dt is None and ts:
+        local_dt = _parse_betboom_wall_datetime(ts)
+    if local_dt is not None:
+        date_s = local_dt.date().isoformat()
+        time_s = local_dt.strftime("%H:%M")
+
+    return _build_betboom_event(
+        sport=sport,
+        title=title,
+        league=league,
+        home=home,
+        away=away,
+        local_dt=local_dt,
+        source_url=str(d.get("url") or page_url),
+        date_s=date_s,
+        time_s=time_s,
+    )
+
+
 def _event_from_loose_dict(d: dict[str, Any], *, page_sport: str, page_url: str) -> dict[str, Any] | None:
-    """Эвристика для JSON из network capture."""
+    """Эвристика для JSON из Playwright capture."""
     title = str(d.get("title") or d.get("name") or "").strip()
     home = _team_name(d.get("home") or d.get("homeTeam") or d.get("team1"))
     away = _team_name(d.get("away") or d.get("awayTeam") or d.get("team2"))
@@ -264,18 +441,36 @@ def _walk_json_for_events(
     page_url: str,
     out: list[dict[str, Any]],
     depth: int = 0,
+    json_endpoint: bool = False,
 ) -> None:
     if depth > 14:
         return
     if isinstance(obj, dict):
-        ev = _event_from_loose_dict(obj, page_sport=page_sport, page_url=page_url)
+        if json_endpoint:
+            ev = _event_from_json_dict(obj, page_sport=page_sport, page_url=page_url)
+        else:
+            ev = _event_from_loose_dict(obj, page_sport=page_sport, page_url=page_url)
         if ev:
             out.append(ev)
         for v in obj.values():
-            _walk_json_for_events(v, page_sport=page_sport, page_url=page_url, out=out, depth=depth + 1)
+            _walk_json_for_events(
+                v,
+                page_sport=page_sport,
+                page_url=page_url,
+                out=out,
+                depth=depth + 1,
+                json_endpoint=json_endpoint,
+            )
     elif isinstance(obj, list):
         for item in obj[:500]:
-            _walk_json_for_events(item, page_sport=page_sport, page_url=page_url, out=out, depth=depth + 1)
+            _walk_json_for_events(
+                item,
+                page_sport=page_sport,
+                page_url=page_url,
+                out=out,
+                depth=depth + 1,
+                json_endpoint=json_endpoint,
+            )
 
 
 def _dedupe_raw(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -303,6 +498,32 @@ def filter_betboom_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             out.append(e)
     log.info("BETBOOM_FILTERED_EVENTS raw=%s worthy=%s", len(events), len(out))
     return out
+
+
+def _json_root_keys(data: Any) -> list[str]:
+    if isinstance(data, dict):
+        return [str(k) for k in list(data.keys())[:30]]
+    if isinstance(data, list):
+        return [f"list(len={len(data)})"]
+    return [type(data).__name__]
+
+
+def _in_hours_window(e: dict[str, Any], *, hours: int = 72) -> bool:
+    ld = str(e.get("local_datetime") or "")
+    dt: datetime | None = None
+    if ld:
+        try:
+            dt = datetime.fromisoformat(ld)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=VN_TZ)
+        except ValueError:
+            dt = None
+    if dt is None:
+        dt = _parse_local_datetime(str(e.get("date", "")), str(e.get("time", "")))
+    if dt is None:
+        return False
+    now = datetime.now(VN_TZ)
+    return now <= dt <= now + timedelta(hours=hours)
 
 
 def _in_days_window(e: dict[str, Any], *, days_ahead: int) -> bool:
@@ -392,21 +613,145 @@ def _ingest_response_body(
     return 0
 
 
-async def _fetch_json_url() -> list[dict[str, Any]]:
+async def fetch_betboom_json_http(*, max_hours: int = 72) -> BetBoomJsonProbeResult:
+    """HTTP GET BETBOOM_JSON_URL → события (без Playwright)."""
     if not BETBOOM_JSON_URL:
-        return []
-    headers = {
-        "User-Agent": "Mozilla/5.0 GastrobarBot/1.0",
-        "Accept": "application/json",
-        "Referer": BETBOOM_BASE_URL,
-    }
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        r = await client.get(BETBOOM_JSON_URL, headers=headers)
-        r.raise_for_status()
+        return BetBoomJsonProbeResult(url_set=False, error="BETBOOM_JSON_URL not set")
+
+    try:
+        headers = betboom_json_headers()
+    except ValueError as exc:
+        return BetBoomJsonProbeResult(url_set=True, error=str(exc))
+
+    log.info("BETBOOM_JSON_FETCH url=%s", BETBOOM_JSON_URL[:120])
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            r = await client.get(BETBOOM_JSON_URL, headers=headers)
+    except httpx.HTTPError as exc:
+        log.exception("BETBOOM_JSON_FETCH http error", exc_info=True)
+        return BetBoomJsonProbeResult(
+            url_set=True,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+    content_type = (r.headers.get("content-type") or "").split(";")[0].strip()
+    body_preview = (r.text or "")[:500]
+    status = r.status_code
+
+    if status in (401, 403):
+        log.warning("BETBOOM_JSON_FETCH auth required status=%s", status)
+        return BetBoomJsonProbeResult(
+            url_set=True,
+            status_code=status,
+            content_type=content_type,
+            error=(
+                "BetBoom JSON endpoint требует cookie/header. "
+                "Скопируйте headers из DevTools."
+            ),
+            body_preview=body_preview,
+            auth_required=True,
+        )
+
+    if status >= 400:
+        log.warning(
+            "BETBOOM_JSON_FETCH http %s body=%s",
+            status,
+            body_preview[:200],
+        )
+        return BetBoomJsonProbeResult(
+            url_set=True,
+            status_code=status,
+            content_type=content_type,
+            error=f"HTTP {status}",
+            body_preview=body_preview,
+        )
+
+    try:
         data = r.json()
+    except json.JSONDecodeError as exc:
+        log.error(
+            "BETBOOM_JSON_PARSE failed: %s body_preview=%s",
+            exc,
+            body_preview,
+        )
+        return BetBoomJsonProbeResult(
+            url_set=True,
+            status_code=status,
+            content_type=content_type,
+            error=f"JSON parse failed: {exc}",
+            body_preview=body_preview,
+        )
+
     found: list[dict[str, Any]] = []
-    _walk_json_for_events(data, page_sport="football", page_url=BETBOOM_JSON_URL, out=found)
-    return _dedupe_raw(found)
+    _walk_json_for_events(
+        data,
+        page_sport="football",
+        page_url=BETBOOM_JSON_URL,
+        out=found,
+        json_endpoint=True,
+    )
+    deduped = _dedupe_raw(found)
+    in_window = [e for e in deduped if _in_hours_window(e, hours=max_hours)]
+    log.info(
+        "BETBOOM_JSON_FETCH ok status=%s root_keys=%s raw=%s in_%sh=%s",
+        status,
+        _json_root_keys(data),
+        len(deduped),
+        max_hours,
+        len(in_window),
+    )
+    return BetBoomJsonProbeResult(
+        url_set=True,
+        status_code=status,
+        content_type=content_type,
+        root_keys=_json_root_keys(data),
+        raw_events=in_window,
+    )
+
+
+def format_debug_betboom_json_report(probe: BetBoomJsonProbeResult) -> str:
+    lines = [
+        "🔎 BetBoom JSON debug",
+        f"BETBOOM_JSON_URL set: {'yes' if probe.url_set else 'no'}",
+    ]
+    if not probe.url_set:
+        lines.append("")
+        lines.append("Задайте BETBOOM_JSON_URL в Railway Variables (URL из DevTools → Network).")
+        return "\n".join(lines)
+
+    if probe.error and probe.status_code is None:
+        lines.append(f"error: {probe.error}")
+        return "\n".join(lines)
+
+    lines.append(f"status code: {probe.status_code or '—'}")
+    lines.append(f"content-type: {probe.content_type or '—'}")
+    if probe.root_keys:
+        lines.append(f"json root keys: {', '.join(probe.root_keys[:15])}")
+    else:
+        lines.append("json root keys: —")
+    lines.append(f"найдено raw events: {len(probe.raw_events)}")
+
+    if probe.error:
+        lines.append("")
+        lines.append(f"⚠️ {probe.error}")
+        if probe.body_preview and probe.auth_required:
+            lines.append(f"preview: {probe.body_preview[:200]}")
+
+    if probe.raw_events:
+        lines.append("")
+        lines.append("Первые 5 событий:")
+        for i, ev in enumerate(probe.raw_events[:5], 1):
+            lines.append(
+                f"{i}. {ev.get('sport', '?')} | {ev.get('league', '')} | "
+                f"{ev.get('participants') or ev.get('title', '?')} | "
+                f"{ev.get('local_datetime') or ev.get('date', '')} {ev.get('time', '')}"
+            )
+    return "\n".join(lines)
+
+
+async def debug_betboom_json() -> str:
+    probe = await fetch_betboom_json_http(max_hours=72)
+    return format_debug_betboom_json_report(probe)
 
 
 def _playwright_fetch_sync(*, days_ahead: int) -> list[dict[str, Any]]:
@@ -573,23 +918,29 @@ async def _fetch_betboom_line_inner(*, days_ahead: int = 3) -> BetBoomFetchResul
     result = BetBoomFetchResult(events=[], fetch_note=None)
     raw: list[dict[str, Any]] = []
     errors: list[str] = []
+    max_hours = max(72, days_ahead * 24)
 
-    try:
-        if BETBOOM_JSON_URL:
-            raw.extend(await _fetch_json_url())
-    except Exception as exc:
-        errors.append(f"json_url:{exc}")
-        log.exception("BETBOOM_PARSE_ERROR json_url", exc_info=True)
-
-    if BETBOOM_USE_PLAYWRIGHT and len(raw) < 3:
-        try:
-            pw = await _fetch_via_playwright(days_ahead=days_ahead)
-            raw.extend(pw)
-        except Exception as exc:
-            errors.append(f"playwright:{exc}")
-            log.exception("BETBOOM_PARSE_ERROR playwright", exc_info=True)
-
-    raw = [e for e in raw if _in_days_window(e, days_ahead=days_ahead)]
+    if BETBOOM_JSON_URL:
+        probe = await fetch_betboom_json_http(max_hours=max_hours)
+        if probe.error:
+            errors.append(probe.error)
+            if probe.auth_required:
+                result.fetch_note = _FETCH_NOTE_JSON_AUTH
+            else:
+                result.fetch_note = _FETCH_NOTE_PARSE_ERROR
+            log.warning("BETBOOM_JSON_FETCH failed: %s", probe.error)
+        else:
+            raw = list(probe.raw_events)
+            log.info("BETBOOM_JSON_ONLY raw=%s (Playwright skipped)", len(raw))
+    else:
+        if BETBOOM_USE_PLAYWRIGHT:
+            try:
+                pw = await _fetch_via_playwright(days_ahead=days_ahead)
+                raw.extend(pw)
+            except Exception as exc:
+                errors.append(f"playwright:{exc}")
+                log.exception("BETBOOM_PARSE_ERROR playwright", exc_info=True)
+        raw = [e for e in raw if _in_days_window(e, days_ahead=days_ahead)]
     raw = _dedupe_raw(raw)
     result.raw_found = len(raw)
     log.info("BETBOOM_EVENTS_FOUND raw=%s", result.raw_found)
@@ -622,7 +973,9 @@ async def _fetch_betboom_line_inner(*, days_ahead: int = 3) -> BetBoomFetchResul
     filtered = filter_betboom_events(raw)
     result.events = filtered
     result.filtered_found = len(filtered)
-    result.fetch_note = _FETCH_NOTE_OK
+    result.fetch_note = (
+        _FETCH_NOTE_JSON_OK if BETBOOM_JSON_URL else _FETCH_NOTE_OK
+    )
     result.errors = errors
     await save_betboom_cache(raw, meta={"days_ahead": days_ahead, "worthy": len(filtered)})
     log.info(
@@ -639,6 +992,7 @@ def is_betboom_failure_note(note: str | None) -> bool:
         _FETCH_NOTE_UNAVAILABLE,
         _FETCH_NOTE_PARSE_ERROR,
         _FETCH_NOTE_EMPTY,
+        _FETCH_NOTE_JSON_AUTH,
     )
 
 
@@ -649,10 +1003,16 @@ def format_betboom_unavailable_message(note: str | None = None) -> str:
             "Часто на сервере вне РФ. Показан кэш или резерв API-SPORTS (если включён).\n"
             "Можно задать BETBOOM_JSON_URL из DevTools → Network."
         )
+    elif note == _FETCH_NOTE_JSON_AUTH:
+        body = (
+            "BetBoom JSON endpoint требует cookie/header.\n"
+            "Скопируйте headers из DevTools → Network → Copy as cURL "
+            "и задайте BETBOOM_HEADERS_JSON в Railway."
+        )
     elif note == _FETCH_NOTE_PARSE_ERROR:
         body = (
-            "Источник BetBoom: ошибка парсинга линии.\n"
-            "Показан сохранённый кэш (если есть) или попробуйте позже."
+            "Источник BetBoom: ошибка парсинга JSON линии.\n"
+            "Проверьте /debug_betboom_json и BETBOOM_JSON_URL."
         )
     else:
         body = (
@@ -677,6 +1037,10 @@ async def merge_betboom_with_api_fallback(
     note = bb.fetch_note or _FETCH_NOTE_UNAVAILABLE
 
     from config import BETBOOM_EMERGENCY_API_FALLBACK
+
+    if BETBOOM_JSON_URL:
+        log.info("BETBOOM_JSON_URL set — API-SPORTS fallback skipped")
+        return [], note, bb.raw_found
 
     if not BETBOOM_API_FALLBACK and not BETBOOM_EMERGENCY_API_FALLBACK:
         log.info(

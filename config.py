@@ -136,6 +136,7 @@ BETBOOM_SITE_API: str = (
     os.getenv("BETBOOM_SITE_API") or "https://siteapi.betboom.ru/api/site_api/v1"
 ).strip().rstrip("/")
 BETBOOM_JSON_URL: str = os.getenv("BETBOOM_JSON_URL", "").strip()
+BETBOOM_HEADERS_JSON: str = os.getenv("BETBOOM_HEADERS_JSON", "").strip()
 BETBOOM_USE_PLAYWRIGHT: bool = os.getenv("BETBOOM_USE_PLAYWRIGHT", "1").strip().lower() in (
     "1",
     "true",
@@ -164,3 +165,29 @@ EVENT_RADAR_TIMEOUT_SEC: float = float(os.getenv("EVENT_RADAR_TIMEOUT_SEC", "35"
 # BetBoom ingest внутри pipeline (Playwright)
 BETBOOM_FETCH_TIMEOUT_SEC: float = float(os.getenv("BETBOOM_FETCH_TIMEOUT_SEC", "28") or "28")
 BETBOOM_PAGE_TIMEOUT_MS: int = int(os.getenv("BETBOOM_PAGE_TIMEOUT_MS", "12000") or "12000")
+
+
+def betboom_json_headers() -> dict[str, str]:
+    """HTTP headers для BETBOOM_JSON_URL (+ опционально BETBOOM_HEADERS_JSON)."""
+    import json
+
+    headers: dict[str, str] = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Referer": f"{BETBOOM_BASE_URL}/sport/football",
+        "Origin": BETBOOM_BASE_URL,
+    }
+    if not BETBOOM_HEADERS_JSON:
+        return headers
+    try:
+        extra = json.loads(BETBOOM_HEADERS_JSON)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"BETBOOM_HEADERS_JSON invalid JSON: {exc}") from exc
+    if not isinstance(extra, dict):
+        raise ValueError("BETBOOM_HEADERS_JSON must be a JSON object")
+    for k, v in extra.items():
+        headers[str(k)] = str(v)
+    return headers

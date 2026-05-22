@@ -211,6 +211,10 @@ async def set_bot_commands(bot: Bot) -> None:
         BotCommand(command="debug_cache", description="Статус weekly cache (admin)"),
         BotCommand(command="radar_debug", description="Event Radar: счётчики и отбраковка"),
         BotCommand(command="api_status", description="API-SPORTS: статус по видам спорта"),
+        BotCommand(
+            command="debug_betboom_json",
+            description="BetBoom JSON endpoint: probe",
+        ),
     ]
     scopes = (
         BotCommandScopeDefault(),
@@ -314,7 +318,12 @@ async def _answer_radar_empty(
     )
     from weekly_events_cache import get_weekly_events_cache_for_display
 
-    if fetch_note in ("betboom_unavailable", "betboom_parse_error", "betboom_empty_line"):
+    if fetch_note in (
+        "betboom_unavailable",
+        "betboom_parse_error",
+        "betboom_empty_line",
+        "betboom_json_auth",
+    ):
         from betboom_parser import format_betboom_unavailable_message
 
         cached = await get_weekly_events_cache_for_display()
@@ -992,6 +1001,19 @@ async def cmd_radar_debug(message: Message) -> None:
     if len(body) > 4000:
         body = body[:3990] + "\n…(обрезано)"
     await message.answer(body)
+
+
+@router.message(Command("debug_betboom_json"))
+async def cmd_debug_betboom_json(message: Message) -> None:
+    from betboom_parser import debug_betboom_json
+
+    async with show_typing(message.bot, message.chat.id):
+        try:
+            body = await asyncio.wait_for(debug_betboom_json(), timeout=35.0)
+        except asyncio.TimeoutError:
+            await message.answer("⏱ /debug_betboom_json: таймаут (>35 с).")
+            return
+    await message.answer(body[:4000] if len(body) > 4000 else body)
 
 
 @router.message(Command("api_status"))
