@@ -947,9 +947,12 @@ def _fetch_f1_gemini_supplement_sync() -> tuple[list[dict[str, Any]], int, str |
         return [], 0, None
 
 
-async def _fetch_f1_gemini_verified_events() -> list[dict[str, Any]]:
-    """F1-сессии из Gemini + verify (когда API-SPORTS F1 пустой)."""
-    prelim, _, _ = await asyncio.to_thread(_fetch_f1_gemini_supplement_sync)
+async def _fetch_gemini_supplement_verified_events(
+    fetch_sync_fn,
+    *,
+    phase: str,
+) -> list[dict[str, Any]]:
+    prelim, _, _ = await asyncio.to_thread(fetch_sync_fn)
     if not prelim:
         return []
 
@@ -961,18 +964,78 @@ async def _fetch_f1_gemini_verified_events() -> list[dict[str, Any]]:
     verified: list[dict[str, Any]] = []
     for cand, r in zip(prelim, results):
         if r is None and is_major_search_candidate(cand):
-            r = soft_lock_search_candidate(cand, phase="f1_supplement")
+            r = soft_lock_search_candidate(cand, phase=phase)
         if not r or str(r.get("confidence", "medium")).lower() not in ("high", "medium"):
             continue
         if not has_locked_schedule(r):
-            r = lock_event_schedule(r, phase="f1_supplement") or r
+            r = lock_event_schedule(r, phase=phase) or r
         if r and has_locked_schedule(r):
             validated = filter_radar_events(
-                [r], phase="f1_supplement", allow_gemini_discovery=True
+                [r], phase=phase, allow_gemini_discovery=True
             )
             if validated:
                 verified.extend(validated)
     return _dedupe_radar_candidates(verified)
+
+
+async def _fetch_f1_gemini_verified_events() -> list[dict[str, Any]]:
+    """F1-сессии из Gemini + verify (когда API-SPORTS F1 пустой)."""
+    return await _fetch_gemini_supplement_verified_events(
+        _fetch_f1_gemini_supplement_sync,
+        phase="f1_supplement",
+    )
+
+
+def _ufc_gemini_supplement_prompt() -> str:
+    year = date.today().year
+    schema = _radar_schema_instructions(8)
+    return f"""Find UFC / major MMA cards for a bar TV guide (Nha Trang audience).
+
+CURRENT WEEK ONLY ({_week_range_human()}). Use Google Search on UFC.com / official broadcast listings.
+
+Return JSON rows for cards in the next 7 days with Main Card start time.
+Title must include fighter names: "Fighter A vs. Fighter B" or "UFC Fight Night: A vs. B".
+For US cards use America/New_York or America/Los_Angeles as source_timezone.
+
+Only confirmed cards with named main event or official Main Card time. No old/historical fights.
+
+{schema}
+"""
+
+
+def _fetch_ufc_gemini_supplement_sync() -> tuple[list[dict[str, Any]], int, str | None]:
+    """Один Gemini Search только для UFC (дополнение now24)."""
+    from gemini_usage import should_skip_gemini_discovery_sync
+
+    if not GEMINI_API_KEY or should_skip_gemini_discovery_sync():
+        return [], 0, None
+    try:
+        prelim, raw, note = _gemini_fetch_with_search_fallback(
+            _ufc_gemini_supplement_prompt(),
+            log_label="ufc_supplement",
+            max_attempts=1,
+        )
+        log.info(
+            "Event Radar UFC Gemini supplement: prelim=%s raw=%s note=%s",
+            len(prelim),
+            raw,
+            note,
+        )
+        return prelim, raw, note
+    except Exception as e:
+        if _is_gemini_free_quota_error(e):
+            log.warning("Event Radar UFC supplement: Gemini quota")
+            return [], 0, "gemini_quota"
+        log.exception("Event Radar UFC supplement failed", exc_info=True)
+        return [], 0, None
+
+
+async def _fetch_ufc_gemini_verified_events() -> list[dict[str, Any]]:
+    """UFC-карты из Gemini + verify (now24, когда нет API)."""
+    return await _fetch_gemini_supplement_verified_events(
+        _fetch_ufc_gemini_supplement_sync,
+        phase="ufc_supplement",
+    )
 
 
 def _confidence_sort_key(e: dict[str, Any]) -> tuple[int, str, str]:
@@ -1556,11 +1619,18 @@ async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, 
         merged.extend(cache_win)
         sources.append(f"cache_24h={len(cache_win)}/{len(cached)}")
 
-    f1_extra = await _fetch_f1_gemini_verified_events()
+    f1_extra, ufc_extra = await asyncio.gather(
+        _fetch_f1_gemini_verified_events(),
+        _fetch_ufc_gemini_verified_events(),
+    )
     if f1_extra:
         f1_win = [e for e in f1_extra if is_in_next24_window(e, log_checks=False)]
         merged.extend(f1_win)
         sources.append(f"f1_gemini={len(f1_win)}")
+    if ufc_extra:
+        ufc_win = [e for e in ufc_extra if is_in_next24_window(e, log_checks=False)]
+        merged.extend(ufc_win)
+        sources.append(f"ufc_gemini={len(ufc_win)}")
 
     pool = dedupe_events(merged, log_prefix="now24_merge", exact=True)
     fetch_note = ("now24_" + "+".join(sources)) if sources else None

@@ -490,14 +490,17 @@ async def _run_radar_mode(
         found_n = pre_count if pre_count else raw_total
         stats = (
             f"{_ru_found_events_line(found_n)}\n"
-            f"{_ru_selected_main_line(selected, mode=mode)}"
+            f"{_ru_selected_main_line(selected, mode='now24' if mode == 'now24' else 'week')}"
         )
         body = (
             format_radar_week_message(events)
             if mode == "week"
             else format_radar_now24_message(events)
         )
-        text = f"{extra}\n{stats}\n\n{body}" if extra else f"{stats}\n\n{body}"
+        if mode == "now24":
+            text = f"{stats}\n\n{body}"
+        else:
+            text = f"{extra}\n{stats}\n\n{body}" if extra else f"{stats}\n\n{body}"
         kb = radar_week_result_kb() if mode == "week" else radar_now24_result_kb()
         async with show_typing(bot, chat_id):
             await message.answer(text, reply_markup=kb)

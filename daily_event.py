@@ -257,14 +257,20 @@ def _select_now24_balanced(
 
 
 def _now24_major_event(ev: dict[str, Any]) -> bool:
-    """F1 / плей-офф / топ-матчи — не резать жёстким tier/watchability в NOW24."""
+    """F1 / UFC / плей-офф / топ-матчи — не резать жёстким tier/watchability в NOW24."""
+    from event_verifier import bar_event_blob
     from watchability import detect_editorial_type, is_major_weekly_event
 
     et = detect_editorial_type(ev)
+    b = bar_event_blob(ev)
     if et == "f1":
         return True
-    if et in ("nba", "nhl", "ufc", "esports"):
-        return int(ev.get("watchability_score", 0)) >= 38
+    if et == "ufc":
+        return True
+    if et == "nhl" and re.search(r"stanley|playoff|conference\s+final|\bfinal\b", b, re.I):
+        return True
+    if et in ("nba", "nhl", "esports"):
+        return int(ev.get("watchability_score", 0)) >= 32
     if is_major_weekly_event(ev):
         return True
     return False
@@ -276,7 +282,7 @@ def select_now24_events(
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Сильные события в ближайшие 24 ч; без добивания слабым хвостом."""
-    from event_participants import is_gastrobar_eligible, passes_participant_rules
+    from event_participants import passes_participant_rules
     from event_verifier import gastrobar_hard_reject
     from locked_time import has_locked_schedule
     from next24 import is_in_next24_window, log_next24_window_header
@@ -311,6 +317,18 @@ def select_now24_events(
             _drop("outside_window", ev)
             continue
 
+        from watchability import detect_editorial_type
+
+        verified_api = "api-sports" in str(ev.get("verified_via", "")).lower()
+
+        if verified_api:
+            ok_part, part_reason = passes_participant_rules(ev)
+            if not ok_part:
+                _drop(f"participant:{part_reason}", ev)
+                continue
+            candidates.append(enrich_daily_campaign_meta(ev, now))
+            continue
+
         major = _now24_major_event(ev) or has_locked_schedule(ev)
 
         if major:
@@ -332,31 +350,45 @@ def select_now24_events(
                 _drop("football_league", ev)
                 continue
             fb_score, _ = football_watchability_score(item, ev)
-            if fb_score < NOW24_FOOTBALL_MIN_WATCHABILITY:
+            fb_min = max(28, NOW24_FOOTBALL_MIN_WATCHABILITY - 8)
+            if fb_score < fb_min:
                 _drop("football_score", ev)
                 continue
             ev["football_watchability_score"] = fb_score
+            ok_part, part_reason = passes_participant_rules(ev)
+            if not ok_part:
+                _drop(f"participant:{part_reason}", ev)
+                continue
+            candidates.append(enrich_daily_campaign_meta(ev, now))
+            continue
+
         if has_locked_schedule(ev):
             ok_part, part_reason = passes_participant_rules(ev)
             if not ok_part:
                 _drop(f"participant:{part_reason}", ev)
                 continue
-        elif str(ev.get("verified_via", "")).upper() == "API-SPORTS":
-            if gastrobar_hard_reject(ev):
-                _drop("hard_reject", ev)
-                continue
+            candidates.append(enrich_daily_campaign_meta(ev, now))
+            continue
+
+        ws = int(ev.get("watchability_score", 0))
+        if ws >= 28:
             ok_part, part_reason = passes_participant_rules(ev)
             if not ok_part:
                 _drop(f"participant:{part_reason}", ev)
                 continue
-        else:
-            if int(ev.get("radar_tier", 99)) >= 99 and int(ev.get("watchability_score", 0)) < 45:
-                _drop("low_watchability", ev)
+            candidates.append(enrich_daily_campaign_meta(ev, now))
+            continue
+
+        et = detect_editorial_type(ev)
+        if et in ("f1", "ufc", "nhl", "nba", "esports", "live"):
+            ok_part, part_reason = passes_participant_rules(ev)
+            if ok_part:
+                candidates.append(enrich_daily_campaign_meta(ev, now))
                 continue
-            if not is_gastrobar_eligible(ev):
-                _drop("not_eligible", ev)
-                continue
-        candidates.append(enrich_daily_campaign_meta(ev, now))
+            _drop(f"participant:{part_reason}", ev)
+            continue
+
+        _drop("low_watchability", ev)
 
     log.info(
         "NOW24_FILTER pool_in=%s candidates=%s drops=%s sample=%s",

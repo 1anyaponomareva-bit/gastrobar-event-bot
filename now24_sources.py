@@ -138,14 +138,14 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
         await _now24_filter_pool(
             hockey_raw,
             phase="now24_api_hockey",
-            min_watchability=32,
+            min_watchability=28,
         )
     )
     out.extend(
         await _now24_filter_pool(
             basketball_raw,
             phase="now24_api_basketball",
-            min_watchability=32,
+            min_watchability=28,
         )
     )
     out.extend(
@@ -159,7 +159,7 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
         await _now24_filter_pool(
             esports_raw,
             phase="now24_api_esports",
-            min_watchability=32,
+            min_watchability=28,
         )
     )
 
