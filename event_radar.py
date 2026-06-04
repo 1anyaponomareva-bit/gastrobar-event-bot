@@ -307,7 +307,7 @@ Each item MUST include:
 PARTICIPANT RULES (strict):
 - Sports matches / finals: title MUST name both sides (e.g. "Real Madrid — Barcelona", "Spurs vs Thunder"). Never "Between top clubs" or vague descriptions in title/subtitle.
 - UFC / boxing: both fighters in title OR "UFC Fight Night: Name vs Name".
-- F1: session type in title (Qualifying, Sprint, Race) — not Practice.
+- F1: session type in title (Practice 1/2/3, Qualifying, Sprint, Race) — one row per session.
 - Eurovision: Semi-final or Grand Final in title.
 - Esports: tournament + stage (e.g. "IEM Atlanta 2026 — Grand Final"), not "Final Day Events".
 
@@ -328,7 +328,7 @@ Return a RICH bar TV schedule (15–22 rows): separate F1 sessions, separate NBA
 BAR FILTER — NEVER include:
 - Chicago Med / Chicago Fire / Chicago P.D. / One Chicago (any spelling: PD, P.D., etc.)
 - US network procedural season/series finales (NBC/CBS/ABC/Fox/CW), ordinary episodic TV finales
-- Formula 1 Practice / Free Practice / FP1 / FP2 / FP3 (ONLY Qualifying, Sprint, Race, Grand Prix)
+- Generic TV finales without sport/show context (keep F1 Practice 1/2/3 — they ARE bar events)
 - UFC prelims without Main Card — prefer one row per card: title + "Main Card", no exact main-fight time
 - anything not suitable for a crowded bar TV night
 
@@ -349,7 +349,7 @@ Use Google Search ONCE. Return ONLY one JSON array (aim for {max_n} distinct row
 
 Search across:
 football (Champions League, Europa League, Premier League, La Liga, Serie A, Bundesliga — top matches, derbies, final matchday),
-UFC / boxing main cards, Formula 1 (Sprint Qualifying, Sprint, Qualifying, Race — separate rows),
+UFC / boxing main cards, Formula 1 (Practice 1/2/3, Sprint Qualifying, Sprint, Qualifying, Race — separate rows),
 NBA / NHL playoffs and finals, esports majors (CS2, IEM, Dota TI, LoL Worlds, Valorant Champions),
 Eurovision {year}, Super Bowl, Oscars, Grammys, Emmys, major award shows, Coachella-scale livestreams,
 WWE major events, Apple/PlayStation/Xbox showcases, huge game launches, viral global live broadcasts.
@@ -363,7 +363,7 @@ Do NOT include:
 ordinary TV episodes, Chicago Med/Fire-style finales, local low-interest cups, U21/youth,
 vague placeholders ("Final Day Events"), events without kickoff time.
 
-Separate row per match/session (both teams in title). F1: no practice sessions.
+Separate row per match/session (both teams in title). F1: include every practice and qualifying session.
 
 {schema}
 """
@@ -417,10 +417,12 @@ Only concrete cards with named fights or official card start. No vague "UFC Figh
         ),
         (
             "radar_f1",
-            f"""Search focus: Formula 1 this week — race, sprint, qualifying sessions with official schedule.
-Suggested queries: "Formula 1 this week race qualifying time", "F1 official schedule timezone".
+            f"""Search focus: Formula 1 this week — ALL sessions of the current Grand Prix weekend.
+Include Practice 1, Practice 2, Practice 3, Sprint Qualifying, Sprint, Qualifying, Race as separate rows.
+Suggested queries: "Formula 1 Monaco Grand Prix 2026 schedule practice qualifying", "F1 official schedule timezone".
 
-Concrete session names (Qualifying, Sprint, Race) with times.
+Title examples: "Monaco GP - Practice 1", "Monaco Grand Prix - Qualifying".
+For Monaco use Europe/Monaco; other circuits use official circuit IANA timezone.
 {common}
 """,
         ),
@@ -642,7 +644,7 @@ def _validate_concrete_event(raw: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     if is_f1_excluded_event(cand_pre):
-        log.info("local_validation_removed: f1_practice title=%s", title)
+        log.info("local_validation_removed: f1_unknown_session title=%s", title)
         return None
 
     out = {
@@ -897,6 +899,80 @@ def fetch_radar_multi_search_sync(
         log.info("Event Radar: RADAR_MULTI_SHARD enabled — multiple Gemini calls")
         return _fetch_radar_multi_search_sharded()
     return _fetch_radar_combined_once(force_gemini=force_gemini)
+
+
+def _f1_gemini_supplement_prompt() -> str:
+    year = date.today().year
+    schema = _radar_schema_instructions(10)
+    return f"""Find Formula 1 Grand Prix weekend sessions for a bar TV guide (Nha Trang audience).
+
+CURRENT WEEK ONLY ({_week_range_human()}). Use Google Search on official F1.com / race schedule.
+
+Return separate JSON rows for EACH session this week:
+Practice 1, Practice 2, Practice 3 (Free Practice), Sprint Qualifying, Sprint, Qualifying, Race.
+
+Example titles: "Monaco GP - Practice 1", "Monaco Grand Prix - Qualifying".
+Monaco GP → source_timezone Europe/Monaco. Other GPs → circuit local IANA zone.
+
+Do NOT omit practice sessions. Exact date + time + source_timezone from official listing.
+
+{schema}
+"""
+
+
+def _fetch_f1_gemini_supplement_sync() -> tuple[list[dict[str, Any]], int, str | None]:
+    """Один Gemini Search только для F1 (дополнение к API-first)."""
+    from gemini_usage import should_skip_gemini_discovery_sync
+
+    if not GEMINI_API_KEY or should_skip_gemini_discovery_sync():
+        return [], 0, None
+    try:
+        prelim, raw, note = _gemini_fetch_with_search_fallback(
+            _f1_gemini_supplement_prompt(),
+            log_label="f1_supplement",
+            max_attempts=1,
+        )
+        log.info(
+            "Event Radar F1 Gemini supplement: prelim=%s raw=%s note=%s",
+            len(prelim),
+            raw,
+            note,
+        )
+        return prelim, raw, note
+    except Exception as e:
+        if _is_gemini_free_quota_error(e):
+            log.warning("Event Radar F1 supplement: Gemini quota")
+            return [], 0, "gemini_quota"
+        log.exception("Event Radar F1 supplement failed", exc_info=True)
+        return [], 0, None
+
+
+async def _fetch_f1_gemini_verified_events() -> list[dict[str, Any]]:
+    """F1-сессии из Gemini + verify (когда API-SPORTS F1 пустой)."""
+    prelim, _, _ = await asyncio.to_thread(_fetch_f1_gemini_supplement_sync)
+    if not prelim:
+        return []
+
+    from locked_time import has_locked_schedule, lock_event_schedule
+    from radar_current_week import filter_radar_events
+    from radar_recall import is_major_search_candidate, soft_lock_search_candidate
+
+    results = await asyncio.gather(*[verify_event(e) for e in prelim])
+    verified: list[dict[str, Any]] = []
+    for cand, r in zip(prelim, results):
+        if r is None and is_major_search_candidate(cand):
+            r = soft_lock_search_candidate(cand, phase="f1_supplement")
+        if not r or str(r.get("confidence", "medium")).lower() not in ("high", "medium"):
+            continue
+        if not has_locked_schedule(r):
+            r = lock_event_schedule(r, phase="f1_supplement") or r
+        if r and has_locked_schedule(r):
+            validated = filter_radar_events(
+                [r], phase="f1_supplement", allow_gemini_discovery=True
+            )
+            if validated:
+                verified.extend(validated)
+    return _dedupe_radar_candidates(verified)
 
 
 def _confidence_sort_key(e: dict[str, Any]) -> tuple[int, str, str]:
@@ -1219,6 +1295,14 @@ async def _fetch_radar_pipeline(
 
     if skip_gemini and api_seed:
         pool = [e for e in api_seed if not gastrobar_hard_reject(e)]
+        f1_gemini = await _fetch_f1_gemini_verified_events()
+        if f1_gemini:
+            pool = _dedupe_radar_candidates(pool + f1_gemini)
+            log.info(
+                "Event Radar: API-first + F1 Gemini supplement merged=%s total_pool=%s",
+                len(f1_gemini),
+                len(pool),
+            )
         log.info(
             "WEEKLY_PIPELINE API_ONLY: FOUND(raw_api)=%s SEED=%s POOL=%s",
             api_raw,

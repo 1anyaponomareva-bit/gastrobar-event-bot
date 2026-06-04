@@ -103,7 +103,14 @@ def _is_ufc_or_boxing(b: str) -> bool:
 
 
 def _is_f1(b: str) -> bool:
-    return bool(re.search(r"formula\s*1|\bf1\b|grand\s+prix", b))
+    return bool(
+        re.search(
+            r"formula\s*1|\bf1\b|grand\s+prix|гран-?\s*при|"
+            r"monaco\s+gp|grand\s+prix\s+of\s+monaco",
+            b,
+            re.I,
+        )
+    )
 
 
 def _is_eurovision(b: str) -> bool:
@@ -184,9 +191,13 @@ def passes_participant_rules(e: dict[str, Any]) -> tuple[bool, str]:
         return False, "title_equals_subtitle"
 
     if _is_f1(b):
-        if re.search(r"practice|free\s+practice|fp1|fp2|fp3", b):
-            return False, "f1_practice"
-        if re.search(r"qualifying|sprint|\brace|grand\s+prix", b):
+        if re.search(
+            r"practice|free\s+practice|fp1|fp2|fp3|практика\s*[123]?",
+            b,
+            re.I,
+        ):
+            return True, "f1_practice_ok"
+        if re.search(r"qualifying|qualification|sprint|\brace|grand\s+prix", b, re.I):
             return True, "f1_session_ok"
         return False, "f1_unknown_session"
 

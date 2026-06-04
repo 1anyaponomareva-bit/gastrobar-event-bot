@@ -26,8 +26,12 @@ def is_major_search_candidate(e: dict[str, Any]) -> bool:
     if "HOCKEY" in cat or "NHL" in cat or re.search(r"\bnhl\b|stanley", b, re.I):
         if re.search(r"playoff|conference\s+final|stanley", b, re.I):
             return True
-    if re.search(r"formula\s*1|\bf1\b|grand\s+prix", b, re.I):
-        if re.search(r"qualifying|sprint|\brace\b", b, re.I):
+    if re.search(r"formula\s*1|\bf1\b|grand\s+prix|гран-?\s*при|monaco\s+gp", b, re.I):
+        if re.search(
+            r"practice|qualifying|sprint|\brace\b|fp[123]|практика|grand\s+prix",
+            b,
+            re.I,
+        ):
             return True
     if re.search(r"premier\s+league|\bepl\b|\bucl\b|champions\s+league", b, re.I):
         if has_matchup_in_title(title):
