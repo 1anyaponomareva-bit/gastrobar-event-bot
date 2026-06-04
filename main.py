@@ -967,11 +967,10 @@ async def main() -> None:
     )
 
     log.info("Starting Gastrobar bot...")
+    await init_db()
     log_startup_banner()
     validate_required_config()
     log.info("aiogram version: %s", getattr(aiogram, "__version__", "unknown"))
-
-    await init_db()
     from weekly_events_cache import load_weekly_events_cache
 
     await load_weekly_events_cache()

@@ -5,7 +5,7 @@ from __future__ import annotations
 from config import GEMINI_API_KEY, RUN_MODE, is_local_run, is_railway_run
 
 # Меняйте при деплое — по этой метке видно, какой код ответил в Telegram.
-BOT_BUILD_ID = "radar-ui-3days-deploy-20260520"
+BOT_BUILD_ID = "fix-quota-tables-startup-20260604"
 
 GEMINI_TROUBLESHOOT = (
     "Проверьте GEMINI_API_KEY через /check и посмотрите логи в терминале, "

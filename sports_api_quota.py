@@ -59,6 +59,7 @@ def api_group_from_url(url: str) -> str:
 
 
 def _get_counts_sync(day_vn: str) -> tuple[int, dict[str, int]]:
+    ensure_db_tables_sync()
     with sqlite3.connect(DATABASE_PATH) as conn:
         row = conn.execute(
             "SELECT total_calls FROM sports_api_daily_usage WHERE day_vn = ?",
@@ -113,6 +114,7 @@ def _check_limits_sync(url: str) -> None:
 
 def _record_success_sync(url: str) -> int:
     global _session_calls, _last_call_monotonic
+    ensure_db_tables_sync()
     day = _vn_today()
     group = api_group_from_url(url)
     now_iso = datetime.now(VN_TZ).isoformat()
