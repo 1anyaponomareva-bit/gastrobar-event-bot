@@ -174,6 +174,8 @@ def allows_gemini_discovery_only(e: dict[str, Any]) -> bool:
     """Разрешить Gemini Search без API: Eurovision, F1 с locked UTC, премии."""
     if is_source_verified(e):
         return True
+    if gemini_locked_schedule_ok(e):
+        return True
     b = _category_blob(e)
     if "eurovision" in b:
         return True
@@ -182,6 +184,30 @@ def allows_gemini_discovery_only(e: dict[str, Any]) -> bool:
     if re.search(r"\b(oscar|grammy|emmy|golden\s+globe|academy\s+award)\b", b, re.I):
         return True
     return False
+
+
+def gemini_locked_schedule_ok(e: dict[str, Any]) -> bool:
+    """
+    Gemini Search + locked local_datetime: NBA finals, WWE, топ-матчи без API match.
+    Время уже сконвертировано UTC → Asia/Ho_Chi_Minh — не требуем fixture в API-SPORTS.
+    """
+    from locked_time import has_locked_schedule
+    from radar_recall import is_major_search_candidate
+
+    if not has_locked_schedule(e):
+        return False
+    if str(e.get("confidence", "")).lower() not in ("high", "medium"):
+        return False
+    via = str(e.get("verified_via") or "").lower()
+    if not via or ("gemini" not in via and "search" not in via):
+        return False
+    if is_major_search_candidate(e):
+        return True
+    from event_verifier import _is_entertainment_category
+
+    if _is_entertainment_category(str(e.get("category", ""))):
+        return True
+    return soft_medium_allowed()
 
 
 def log_radar_validation(reason: str, e: dict[str, Any], *, phase: str = "") -> None:
@@ -240,15 +266,22 @@ def validate_radar_event(
         return None
 
     verified = is_source_verified(e)
+    gemini_locked = gemini_locked_schedule_ok(e)
     if requires_strict_verification(e) and not verified:
         if str(e.get("verified_via", "")).upper() == "API-SPORTS":
             verified = True
+        elif gemini_locked:
+            pass
         else:
             log_radar_validation("rejected_unverified_event", e, phase=phase)
             return None
 
     if not verified:
-        gemini_ok = allow_gemini_discovery or allows_gemini_discovery_only(e)
+        gemini_ok = (
+            allow_gemini_discovery
+            or allows_gemini_discovery_only(e)
+            or gemini_locked
+        )
         if not gemini_ok:
             log_radar_validation("rejected_unverified_event", e, phase=phase)
             return None
