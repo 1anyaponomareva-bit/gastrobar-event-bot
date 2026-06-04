@@ -2,13 +2,15 @@
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from radar_horizon_text import radar_afisha_button_label, radar_horizon_days_ru
+
 
 def radar_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📅 Афиша на неделю",
+                    text=radar_afisha_button_label(),
                     callback_data="radar:week",
                 ),
             ],
@@ -33,7 +35,7 @@ def radar_week_result_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="🔄 Обновить принудительно",
+                    text=f"🔄 Обновить ({radar_horizon_days_ru()})",
                     callback_data="radar:week:force",
                 ),
             ],

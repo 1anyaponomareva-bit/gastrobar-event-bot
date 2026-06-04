@@ -74,6 +74,25 @@ def log_startup_banner() -> None:
         log.warning(
             "SPORTS_API_KEY пуст — API-SPORTS выключен: афиша только из Gemini/кэша или заглушки"
         )
+    else:
+        from sports_api_quota import (
+            SPORTS_API_DAILY_MAX,
+            SPORTS_API_MIN_INTERVAL_SEC,
+            SPORTS_API_WEEKLY_MAX_CALLS,
+            get_sports_api_usage_sync,
+        )
+
+        u = get_sports_api_usage_sync()
+        log.info(
+            "API-SPORTS quota guard: max=%s/day interval=%ss weekly_session=%s "
+            "today=%s/%s remaining=%s",
+            SPORTS_API_DAILY_MAX,
+            SPORTS_API_MIN_INTERVAL_SEC,
+            SPORTS_API_WEEKLY_MAX_CALLS,
+            u["total"],
+            SPORTS_API_DAILY_MAX,
+            u["remaining"],
+        )
     if not ADMIN_ID:
         log.warning("ADMIN_ID не задан — планировщик weekly/daily отключён")
 

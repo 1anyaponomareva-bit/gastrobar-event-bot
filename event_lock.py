@@ -220,7 +220,7 @@ def validate_formatter_output(
 def format_locked_weekly_afisha(
     locked: list[LockedEvent],
     *,
-    section_title: str = "🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
+    section_title: str | None = None,
     now24: bool = False,
 ) -> str:
     """
@@ -229,9 +229,12 @@ def format_locked_weekly_afisha(
     """
     from event_afisha_display import afisha_subtitle, format_afisha_when
     from event_grouping import apply_grouping_for_weekly_display, format_parallel_block_lines
+    from radar_horizon_text import radar_afisha_section_title
 
     if not locked:
         return "Пока нет событий в подборке."
+    if not section_title:
+        section_title = radar_afisha_section_title()
 
     events = locked_events_to_dicts(locked)
     display = apply_grouping_for_weekly_display(events, collapse_blocks=not now24)

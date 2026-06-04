@@ -14,6 +14,8 @@ log = logging.getLogger(__name__)
 
 
 async def run_scheduled_weekly_radar(bot: Bot) -> None:
+    from radar_horizon_text import radar_afisha_button_label, radar_horizon_days_ru
+
     log.info("scheduled weekly radar started")
     if not ADMIN_ID:
         log.warning("scheduled weekly radar: ADMIN_ID not set")
@@ -31,13 +33,13 @@ async def run_scheduled_weekly_radar(bot: Bot) -> None:
         if not events:
             await bot.send_message(
                 ADMIN_ID,
-                "📭 На этой неделе в Gastrobar не нашлось крупных эфиров для афиши.\n"
-                "Попробуйте /events → Афиша на неделю позже.",
+                f"📭 На {radar_horizon_days_ru()} в Gastrobar не нашлось крупных эфиров.\n"
+                f"Попробуйте /events → {radar_afisha_button_label()} позже.",
             )
             return
 
         body = format_radar_week_message(events)
-        header = "🔭 Event Radar · Авто-афиша на неделю\n\n"
+        header = f"🔭 Event Radar · Авто-афиша на {radar_horizon_days_ru()}\n\n"
         if fetch_note:
             from event_radar import radar_fetch_header
 

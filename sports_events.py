@@ -1,5 +1,5 @@
 """
-Спортивные события на неделю.
+Спортивные события на горизонт афиши (RADAR_HORIZON_DAYS).
 
 Позже: подключение API-SPORTS / TheSportsDB (SPORTS_API_KEY из .env).
 Сейчас: заглушка + фильтрация «интересного для бара».
@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
@@ -17,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from config import SPORTS_API_KEY, TIMEZONE
+from config import RADAR_HORIZON_DAYS, SPORTS_API_KEY, TIMEZONE
 
 
 def _today() -> date:
@@ -27,12 +26,45 @@ def _today() -> date:
 
 def _week_dates() -> tuple[date, date]:
     start = _today()
-    return start, start + timedelta(days=7)
+    return start, start + timedelta(days=RADAR_HORIZON_DAYS - 1)
 
 
 def _weekly_api_fetch_days() -> int:
-    """Меньше параллельных запросов — free tier API-SPORTS (rate limit)."""
-    return max(1, min(7, int(os.getenv("WEEKLY_API_FETCH_DAYS", "3") or "3")))
+    """Дни API = горизонт афиши (по умолчанию RADAR_HORIZON_DAYS)."""
+    default = str(RADAR_HORIZON_DAYS)
+    return max(1, min(7, int(os.getenv("WEEKLY_API_FETCH_DAYS", default) or default)))
+
+
+def _api_dates_for_days(fetch_days: int) -> list[date]:
+    n = max(1, min(7, fetch_days))
+    return [_today() + timedelta(days=i) for i in range(n)]
+
+
+def _sports_api_fetch_esports() -> bool:
+    return (os.getenv("SPORTS_API_FETCH_ESPORTS", "0") or "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+async def _sequential_day_fetch(
+    dates: list[date],
+    one_day,
+    *,
+    label: str,
+) -> list[dict[str, Any]]:
+    """По одному дню — не бить RPM/квоту параллельным asyncio.gather."""
+    events: list[dict[str, Any]] = []
+    for d in dates:
+        try:
+            chunk = await one_day(d)
+        except Exception as e:
+            log.error("%s day failed (%s): %s", label, d.isoformat(), e)
+            continue
+        if chunk:
+            events.extend(chunk)
+    return events
 
 
 def _weekly_api_dates() -> list[date]:
@@ -111,9 +143,9 @@ def filter_guest_friendly(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _stub_raw_events() -> list[dict[str, Any]]:
-    """Тестовые события на ~7 дней от сегодняшней даты."""
+    """Тестовые события в окне RADAR_HORIZON_DAYS от сегодня."""
     d0 = _today()
-    days = [d0 + timedelta(days=i) for i in range(8)]
+    days = [d0 + timedelta(days=i) for i in range(RADAR_HORIZON_DAYS)]
 
     return [
         {
@@ -1240,6 +1272,18 @@ def build_weekly_program_with_stats(
 
 
 async def _get_json(url: str, *, headers: dict[str, str], timeout: float = 15.0) -> dict[str, Any]:
+    from sports_api_quota import SportsApiQuotaExceeded, acquire_api_call, record_api_success
+
+    try:
+        await acquire_api_call(url)
+    except SportsApiQuotaExceeded as e:
+        log.warning("API-SPORTS local quota block: %s — %s", url, e)
+        return {
+            "response": [],
+            "errors": {"local_quota": str(e)},
+            "results": 0,
+        }
+
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.get(url, headers=headers)
     if r.status_code != 200:
@@ -1247,6 +1291,7 @@ async def _get_json(url: str, *, headers: dict[str, str], timeout: float = 15.0)
     data = r.json()
     if not isinstance(data, dict):
         raise RuntimeError("Unexpected JSON payload")
+    await record_api_success(url)
     errs = data.get("errors") or {}
     # Квота/ключ часто приходят как HTTP 200 + errors + response: []
     if errs:
@@ -1268,7 +1313,9 @@ async def get_football_events_next_days_vn(*, days_ahead: int = 2) -> list[dict[
 
     tz = ZoneInfo("Asia/Ho_Chi_Minh")
     start = datetime.now(tz).date()
-    dates = [start + timedelta(days=i) for i in range(max(1, days_ahead))]
+    cap = max(1, min(7, int(os.getenv("FOOTBALL_API_MAX_DAYS", "3") or "3")))
+    n_days = max(1, min(days_ahead, cap))
+    dates = [start + timedelta(days=i) for i in range(n_days)]
 
     headers = {"x-apisports-key": SPORTS_API_KEY}
     base = "https://v3.football.api-sports.io"
@@ -1320,22 +1367,12 @@ async def get_football_events_next_days_vn(*, days_ahead: int = 2) -> list[dict[
             )
         return day_events
 
-    chunks = await asyncio.gather(
-        *[one_day(d) for d in dates],
-        return_exceptions=True,
-    )
-    events: list[dict[str, Any]] = []
-    for ch in chunks:
-        if isinstance(ch, Exception):
-            log.error("Football now24 day failed: %s", ch)
-            continue
-        events.extend(ch)
-    return events
+    return await _sequential_day_fetch(dates, one_day, label="football_now24")
 
 
-async def get_football_events() -> list[dict[str, Any]]:
+async def get_football_events(*, fetch_days: int | None = None) -> list[dict[str, Any]]:
     """
-    Football API-SPORTS: события на ближайшие 7 дней.
+    Football API-SPORTS: события на горизонт афиши (RADAR_HORIZON_DAYS).
     """
     if not SPORTS_API_KEY:
         return []
@@ -1391,23 +1428,17 @@ async def get_football_events() -> list[dict[str, Any]]:
             )
         return day_events
 
-    # Free plan: from/to недоступен — запрашиваем по date=; дни параллельно, чтобы /week не «висел» минутами.
-    chunks = await asyncio.gather(
-        *[one_day(d) for d in _weekly_api_dates()],
-        return_exceptions=True,
+    dates = (
+        _api_dates_for_days(fetch_days)
+        if fetch_days is not None
+        else _weekly_api_dates()
     )
-    events: list[dict[str, Any]] = []
-    for ch in chunks:
-        if isinstance(ch, Exception):
-            log.error("Football parallel day failed: %s", ch)
-            continue
-        events.extend(ch)
-    return events
+    return await _sequential_day_fetch(dates, one_day, label="football")
 
 
-async def get_basketball_events() -> list[dict[str, Any]]:
+async def get_basketball_events(*, fetch_days: int | None = None) -> list[dict[str, Any]]:
     """
-    Basketball API-SPORTS: события на ближайшие 7 дней.
+    Basketball API-SPORTS: события на горизонт афиши (RADAR_HORIZON_DAYS).
     """
     if not SPORTS_API_KEY:
         return []
@@ -1457,22 +1488,17 @@ async def get_basketball_events() -> list[dict[str, Any]]:
             day_events.append(row)
         return day_events
 
-    chunks = await asyncio.gather(
-        *[one_day(d) for d in _weekly_api_dates()],
-        return_exceptions=True,
+    dates = (
+        _api_dates_for_days(fetch_days)
+        if fetch_days is not None
+        else _weekly_api_dates()
     )
-    events: list[dict[str, Any]] = []
-    for ch in chunks:
-        if isinstance(ch, Exception):
-            log.error("Basketball parallel day failed: %s", ch)
-            continue
-        events.extend(ch)
-    return events
+    return await _sequential_day_fetch(dates, one_day, label="basketball")
 
 
-async def get_hockey_events() -> list[dict[str, Any]]:
+async def get_hockey_events(*, fetch_days: int | None = None) -> list[dict[str, Any]]:
     """
-    Hockey API-SPORTS: события на ближайшие 7 дней.
+    Hockey API-SPORTS: события на горизонт афиши (RADAR_HORIZON_DAYS).
     """
     if not SPORTS_API_KEY:
         return []
@@ -1522,20 +1548,15 @@ async def get_hockey_events() -> list[dict[str, Any]]:
             day_events.append(row)
         return day_events
 
-    chunks = await asyncio.gather(
-        *[one_day(d) for d in _weekly_api_dates()],
-        return_exceptions=True,
+    dates = (
+        _api_dates_for_days(fetch_days)
+        if fetch_days is not None
+        else _weekly_api_dates()
     )
-    events: list[dict[str, Any]] = []
-    for ch in chunks:
-        if isinstance(ch, Exception):
-            log.error("Hockey parallel day failed: %s", ch)
-            continue
-        events.extend(ch)
-    return events
+    return await _sequential_day_fetch(dates, one_day, label="hockey")
 
 
-async def get_esports_events() -> list[dict[str, Any]]:
+async def get_esports_events(*, fetch_days: int | None = None) -> list[dict[str, Any]]:
     """
     Esports API-SPORTS (v1.esports) — если включено в подписку.
     Нет ключа/плана → дни тихо возвращают [].
@@ -1616,20 +1637,15 @@ async def get_esports_events() -> list[dict[str, Any]]:
         log.info("Esports resolved on %s: %s items", d.isoformat(), len(collected))
         return collected
 
-    chunks = await asyncio.gather(
-        *[one_day(d) for d in _weekly_api_dates()],
-        return_exceptions=True,
+    dates = (
+        _api_dates_for_days(fetch_days)
+        if fetch_days is not None
+        else _weekly_api_dates()
     )
-    events: list[dict[str, Any]] = []
-    for ch in chunks:
-        if isinstance(ch, Exception):
-            log.error("Esports parallel day failed: %s", ch)
-            continue
-        events.extend(ch)
-    return events
+    return await _sequential_day_fetch(dates, one_day, label="esports")
 
 
-async def get_formula_events() -> list[dict[str, Any]]:
+async def get_formula_events(*, fetch_days: int | None = None) -> list[dict[str, Any]]:
     """
     Formula 1 API-SPORTS: ближайшие гонки/мероприятия.
     Free plan: используем только races?date=YYYY-MM-DD.
@@ -1668,17 +1684,12 @@ async def get_formula_events() -> list[dict[str, Any]]:
             day_events.extend(expanded)
         return day_events
 
-    chunks = await asyncio.gather(
-        *[one_day(d) for d in _weekly_api_dates()],
-        return_exceptions=True,
+    dates = (
+        _api_dates_for_days(fetch_days)
+        if fetch_days is not None
+        else _weekly_api_dates()
     )
-    events: list[dict[str, Any]] = []
-    for ch in chunks:
-        if isinstance(ch, Exception):
-            log.error("Formula1 parallel day failed: %s", ch)
-            continue
-        events.extend(ch)
-    return events
+    return await _sequential_day_fetch(dates, one_day, label="formula1")
 
 
 async def _merge_raw_week_events() -> list[dict[str, Any]]:
@@ -1690,20 +1701,24 @@ async def _merge_raw_week_events() -> list[dict[str, Any]]:
         )
         return _stub_raw_events()
 
-    results = await asyncio.gather(
-        get_football_events(),
-        get_basketball_events(),
-        get_hockey_events(),
-        get_formula_events(),
-        get_esports_events(),
-        return_exceptions=True,
-    )
+    from sports_api_quota import reset_weekly_session_budget
+
+    reset_weekly_session_budget()
+    fetchers: list[tuple[str, Any]] = [
+        ("football", get_football_events),
+        ("basketball", get_basketball_events),
+        ("hockey", get_hockey_events),
+        ("formula1", get_formula_events),
+    ]
+    if _sports_api_fetch_esports():
+        fetchers.append(("esports", get_esports_events))
 
     merged: list[dict[str, Any]] = []
-    labels = ("football", "basketball", "hockey", "formula1", "esports")
-    for i, r in enumerate(results):
-        if isinstance(r, Exception):
-            log.error("get_week_events sport=%s failed: %s", labels[i], r)
+    for label, fn in fetchers:
+        try:
+            r = await fn()
+        except Exception as e:
+            log.error("get_week_events sport=%s failed: %s", label, e)
             continue
         merged.extend(r)
     _log_found_breakdown(merged, label="RADAR_MERGE_AFTER_FETCH")
@@ -1733,7 +1748,9 @@ def format_week_poster(program: list[dict[str, Any]]) -> str:
     if not program:
         return "События не найдены"
     wd = ("ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС")
-    lines = ["🔥 ГЛАВНОЕ НА НЕДЕЛЕ", ""]
+    from radar_horizon_text import radar_afisha_section_title
+
+    lines = [radar_afisha_section_title(), ""]
     for item in program:
         if item.get("kind") == "block":
             lines.append(f"{item.get('emoji', '')} {item.get('line', '')}")
@@ -1842,7 +1859,9 @@ def _format_day_header(d: date) -> str:
 def format_afisha_message(events: list[dict[str, Any]]) -> str:
     """Текст афиши для Telegram (как в ТЗ)."""
     if not events:
-        return "Пока нет отобранных событий на эту неделю."
+        from radar_horizon_text import radar_horizon_days_ru
+
+        return f"Пока нет отобранных событий на {radar_horizon_days_ru()}."
     by_date: dict[date, list[dict[str, Any]]] = {}
     for e in events:
         try:

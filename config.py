@@ -87,7 +87,12 @@ TIMEZONE: str = (os.getenv("TIMEZONE") or "Asia/Ho_Chi_Minh").strip()
 
 DAILY_POST_HOUR: int = int(os.getenv("DAILY_POST_HOUR", "11") or "11")
 
-# Авто-афиша недели: четверг 10:40 (Asia/Ho_Chi_Minh)
+# Горизонт афиши Event Radar (дни от сегодня, VN): API, Gemini, фильтр дат
+RADAR_HORIZON_DAYS: int = max(
+    1, min(14, int(os.getenv("RADAR_HORIZON_DAYS", "3") or "3"))
+)
+
+# Авто-афиша (3 дня): четверг 10:40 (Asia/Ho_Chi_Minh)
 WEEKLY_RADAR_DOW: int = int(os.getenv("WEEKLY_RADAR_DOW", "3") or "3")  # 0=Пн … 3=Чт
 WEEKLY_RADAR_HOUR: int = int(os.getenv("WEEKLY_RADAR_HOUR", "10") or "10")
 WEEKLY_RADAR_MINUTE: int = int(os.getenv("WEEKLY_RADAR_MINUTE", "40") or "40")

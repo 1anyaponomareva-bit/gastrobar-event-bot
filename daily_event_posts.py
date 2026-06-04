@@ -42,10 +42,16 @@ from weekly_events_cache import (
 
 log = logging.getLogger(__name__)
 
-CACHE_EMPTY_MSG = (
-    "Недельная афиша ещё не собрана. Сначала соберите /events → Афиша на неделю, "
-    "или я сделаю быстрый поиск ближайших 24 часов."
-)
+def _cache_empty_msg() -> str:
+    from radar_horizon_text import radar_afisha_button_label
+
+    return (
+        f"Афиша ещё не собрана. Сначала /events → {radar_afisha_button_label()}, "
+        "или я сделаю быстрый поиск ближайших 24 часов."
+    )
+
+
+CACHE_EMPTY_MSG = _cache_empty_msg()
 
 
 @dataclass
@@ -243,12 +249,14 @@ async def build_post_from_saved_events(
                     "Сначала нажмите ⚡ События ближайших 24 часов."
                 ),
             )
+        from radar_horizon_text import radar_afisha_button_label
+
         return DailyBuildResult(
             ok=False,
             error_code="empty_week",
             error_detail=(
-                "Нет сохранённой недельной афиши. "
-                "Сначала нажмите 📅 Афиша на неделю."
+                "Нет сохранённой афиши. "
+                f"Сначала {radar_afisha_button_label()} в /events."
             ),
         )
     from daily_event import enrich_daily_campaign_meta

@@ -98,17 +98,20 @@ def _ru_found_events_line(n: int) -> str:
 
 
 def _ru_selected_main_line(n: int, *, mode: str = "week") -> str:
+    from radar_horizon_text import radar_horizon_days_ru
+
     if mode == "now24":
         if n % 10 == 1 and n % 100 != 11:
             return f"Выбрано {n} событие на ближайшие 24 часа."
         if 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20):
             return f"Выбрано {n} события на ближайшие 24 часа."
         return f"Выбрано {n} событий на ближайшие 24 часа."
+    horizon = radar_horizon_days_ru()
     if n % 10 == 1 and n % 100 != 11:
-        return f"Выбрано {n} главное событие недели."
+        return f"Выбрано {n} главное событие на {horizon}."
     if 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20):
-        return f"Выбрано {n} главных события недели."
-    return f"Выбрано {n} главных событий недели."
+        return f"Выбрано {n} главных события на {horizon}."
+    return f"Выбрано {n} главных событий на {horizon}."
 
 
 def _fail_conflict(context: str) -> None:
@@ -197,7 +200,7 @@ async def set_bot_commands(bot: Bot) -> None:
         BotCommand(command="start", description="Запустить бота"),
         BotCommand(
             command="events",
-            description="Event Radar — меню",
+            description="Афиша 3 дня / события 24 ч",
         ),
         BotCommand(command="check", description="Проверить API подключения"),
         BotCommand(command="gemini_test", description="Тест Gemini и Google Search"),
@@ -239,6 +242,7 @@ async def cmd_start(message: Message) -> None:
             )
     except Exception:
         logger.exception("Не удалось обновить команды меню при /start")
+    from radar_horizon_text import radar_horizon_days_ru
     from runtime_messages import build_tag_line
 
     build_line = f"\n\n{build_tag_line()}" if is_local_run() else ""
@@ -246,7 +250,7 @@ async def cmd_start(message: Message) -> None:
         f"Бот живой. Твой ID: {user_id}\n\n"
         "Команды меню обновлены. Открой кнопку меню слева от поля ввода — там "
         "/start, /events, /check и /gemini_test.\n\n"
-        "Event Radar: /events — меню (афиша недели или события 24 ч).\n"
+        f"Event Radar: /events — меню ({radar_horizon_days_ru()} или 24 ч).\n"
         "Команду /week можно ввести вручную — она делает то же, что /events (в меню не показывается).\n\n"
         "Если списка нет: полностью закрой чат с ботом и открой снова, либо обнови Telegram."
         f"{build_line}"
@@ -254,10 +258,11 @@ async def cmd_start(message: Message) -> None:
 
 
 def _events_menu_text() -> str:
+    from radar_horizon_text import radar_afisha_menu_line
+
     return (
         "Что собрать?\n\n"
-        "📅 Афиша на неделю\n"
-        "— главные события ближайших 7 дней\n\n"
+        f"{radar_afisha_menu_line()}\n\n"
         "⚡ События ближайших 24 часов\n"
         "— события, которые начнутся в течение суток, плюс готовый пост для Telegram"
     )
@@ -297,7 +302,7 @@ async def _answer_radar_empty(
         if fetch_note == "gemini_quota":
             quota_hint = (
                 "\n⚠️ Лимит Gemini (≈20 запросов/день на free tier) — "
-                "времена могут быть старыми. Завтра нажмите «Обновить неделю»."
+                "времена могут быть старыми. Завтра обновите афишу (кнопка 🔄)."
             )
         if fetch_note == "weekly_cache_quota":
             hdr = (
@@ -358,7 +363,13 @@ async def _run_radar_mode(
         return
 
     chat_id = message.chat.id
-    label = "афиша на неделю" if mode == "week" else "события 24 часа"
+    from radar_horizon_text import radar_horizon_days_ru
+
+    label = (
+        f"афиша на {radar_horizon_days_ru()}"
+        if mode == "week"
+        else "события 24 часа"
+    )
     search_hint = (
         "📦 Загружаю сохранённую афишу…"
         if mode == "week" and not force_refresh
@@ -570,12 +581,18 @@ async def radar_post_week(callback: CallbackQuery) -> None:
     events = _events_from_context(user_id, "week")
     logger.info("POST_WEEK_FROM_STATE: %s", [e.get("title") for e in events])
     if not events:
+        from radar_horizon_text import radar_afisha_button_label
+
         await callback.message.answer(
-            "Нет сохранённой недельной афиши. Сначала нажмите 📅 Афиша на неделю."
+            f"Нет сохранённой афиши. Сначала {radar_afisha_button_label()} в /events."
         )
         return
     async with show_typing(callback.bot, callback.message.chat.id):
-        await callback.message.answer("Пишу пост по афише недели…")
+        from radar_horizon_text import radar_horizon_days_ru
+
+        await callback.message.answer(
+            f"Пишу пост по афише на {radar_horizon_days_ru()}…"
+        )
         post_text = await generate_weekly_poster(events)
     draft_id = await insert_draft("week_post", post_text, "draft")
     last_draft_state[user_id] = {"draft_id": draft_id, "events": events}
@@ -874,7 +891,7 @@ async def cmd_help_hint(message: Message) -> None:
     await message.answer(
         "Я отвечаю только на команды:\n"
         "/start — проверка, что бот на связи\n"
-        "/events — Event Radar (меню: неделя / 24 ч)\n"
+        "/events — Event Radar (афиша 3 дня / 24 ч)\n"
         "/daily — готовый пост на сегодня\n"
         "/check — проверка подключений API\n"
         "/gemini_test — тест Gemini и Google Search\n\n"

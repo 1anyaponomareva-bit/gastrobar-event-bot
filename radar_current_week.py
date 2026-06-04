@@ -66,9 +66,11 @@ def today_local() -> datetime:
 
 
 def current_week_bounds() -> tuple[date, date]:
-    """week_start = сегодня (VN), week_end = сегодня + 7 дней."""
+    """Окно афиши: сегодня (VN) … сегодня + (RADAR_HORIZON_DAYS − 1), включительно."""
+    from config import RADAR_HORIZON_DAYS
+
     t = today_local().date()
-    return t, t + timedelta(days=7)
+    return t, t + timedelta(days=RADAR_HORIZON_DAYS - 1)
 
 
 def _event_local_date(e: dict[str, Any]) -> date | None:

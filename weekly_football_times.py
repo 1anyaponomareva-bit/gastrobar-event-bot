@@ -52,7 +52,7 @@ async def enrich_weekly_football_times(events: list[dict[str, Any]]) -> list[dic
     from radar_sports_convert import lock_football_fixture_event
     from locked_time import reapply_local_from_utc
 
-    api_rows = await get_football_events_next_days_vn(days_ahead=8)
+    api_rows = await get_football_events_next_days_vn(days_ahead=3)
     if not api_rows:
         return events
 

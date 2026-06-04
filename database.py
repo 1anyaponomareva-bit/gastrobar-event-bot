@@ -75,6 +75,26 @@ async def init_db() -> None:
         )
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS sports_api_daily_usage (
+                day_vn TEXT PRIMARY KEY,
+                total_calls INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sports_api_group_usage (
+                day_vn TEXT NOT NULL,
+                api_group TEXT NOT NULL,
+                call_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (day_vn, api_group)
+            )
+            """
+        )
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS scheduled_event_posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 campaign_date TEXT NOT NULL,

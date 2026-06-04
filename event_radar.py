@@ -91,6 +91,12 @@ def _week_range_human() -> str:
     return f"{t0.isoformat()} — {t1.isoformat()}"
 
 
+def _radar_horizon_days_en() -> int:
+    from config import RADAR_HORIZON_DAYS
+
+    return RADAR_HORIZON_DAYS
+
+
 def _is_eurovision_event(e: dict[str, Any]) -> bool:
     return "eurovision" in bar_event_blob(e)
 
@@ -299,7 +305,7 @@ def _radar_schema_instructions(max_n: int) -> str:
     today = _today_iso()
     week = _week_range_human()
     return f"""
-LIVE CURRENT WEEK ONLY ({week}, timezone Asia/Ho_Chi_Minh for your planning — output source local times, NOT Vietnam).
+LIVE WINDOW ONLY — next {_radar_horizon_days_en()} calendar days ({week}, VN planning; output source local times, NOT Vietnam).
 Do NOT use training memory, famous past fights, or old UFC numbered cards (e.g. UFC 302, Fury vs Usyk rematch).
 Do NOT invent tournament cities (e.g. "IEM Dallas" if official schedule says Atlanta).
 Every row MUST be confirmed by a current official listing found via search — if unsure, omit the row.
@@ -341,17 +347,17 @@ BAR FILTER — NEVER include:
 - anything not suitable for a crowded bar TV night
 
 Today: {today}
-Week window: {week}
+Horizon ({_radar_horizon_days_en()} days): {week}
 """
 
 
 def _radar_combined_prompt(max_n: int) -> str:
     year = date.today().year
     schema = _radar_schema_instructions(max_n)
-    return f"""Find major watchable events for a bar audience in Nha Trang this week (Gastrobar TV guide).
+    return f"""Find major watchable events for a bar audience in Nha Trang for the next {_radar_horizon_days_en()} days (Gastrobar TV guide).
 
-LIVE CURRENT WEEK ONLY ({_week_range_human()}). No historical fights, old UFC cards, or memory-based schedules.
-Search official sites; omit anything you cannot confirm for this exact week.
+LIVE WINDOW ONLY ({_week_range_human()}). No historical fights, old UFC cards, or memory-based schedules.
+Search official sites; omit anything you cannot confirm inside this date window.
 
 Use Google Search ONCE. Return ONLY one JSON array (aim for {max_n} distinct rows), no markdown.
 
@@ -407,8 +413,8 @@ def _radar_prompts(max_n: int) -> list[tuple[str, str]]:
     return [
         (
             "radar_sports_utc",
-            f"""Search focus: bar-watchable sports this week — football top leagues, derbies, NBA/NHL (playoffs AND top-team regular season), not only finals.
-Suggested queries: "Premier League this week big matches", "La Liga El Clasico date time", "NBA national TV games this week".
+            f"""Search focus: bar-watchable sports in the next {_radar_horizon_days_en()} days — football top leagues, derbies, NBA/NHL (playoffs AND top-team regular season), not only finals.
+Suggested queries: "Premier League next 3 days big matches", "La Liga El Clasico date time", "NBA national TV games schedule".
 
 Include named team vs team matchups. Skip anonymous cup finals without confirmed teams.
 {common}
@@ -416,8 +422,8 @@ Include named team vs team matchups. Skip anonymous cup finals without confirmed
         ),
         (
             "radar_ufc",
-            f"""Search focus: UFC this week — numbered events / fight nights with confirmed main card start.
-Suggested queries: "UFC this week main card time", "UFC official start time timezone".
+            f"""Search focus: UFC in the next {_radar_horizon_days_en()} days — numbered events / fight nights with confirmed main card start.
+Suggested queries: "UFC main card time this weekend", "UFC official start time timezone".
 
 Only concrete cards with named fights or official card start. No vague "UFC Fight Night" without card/time.
 {common}
@@ -425,7 +431,7 @@ Only concrete cards with named fights or official card start. No vague "UFC Figh
         ),
         (
             "radar_f1",
-            f"""Search focus: Formula 1 this week — ALL sessions of the current Grand Prix weekend.
+            f"""Search focus: Formula 1 in the next {_radar_horizon_days_en()} days — ALL sessions of the current Grand Prix weekend.
 Include Practice 1, Practice 2, Practice 3, Sprint Qualifying, Sprint, Qualifying, Race as separate rows.
 Suggested queries: "Formula 1 Monaco Grand Prix 2026 schedule practice qualifying", "F1 official schedule timezone".
 
@@ -440,9 +446,9 @@ For Monaco use Europe/Monaco; other circuits use official circuit IANA timezone.
 
 Run this exact-style Google query (adapt year if needed): "Eurovision Song Contest {max(year, 2026)} schedule final semi final time UTC"
 
-Also try: "Eurovision this week final time UTC"
+Also try: "Eurovision final semi final time UTC"
 
-If any show occurs this week: MUST return it with exact date, time, and source_timezone (UTC or listed host city IANA).
+If any show occurs in the {_radar_horizon_days_en()}-day window: MUST return it with exact date, time, and source_timezone (UTC or listed host city IANA).
 Title example: "Eurovision Song Contest {year} Grand Final" or Semi-Final 1/2.
 subtitle example: "Music / Live show"
 {common}
@@ -450,8 +456,8 @@ subtitle example: "Music / Live show"
         ),
         (
             "radar_esports",
-            f"""Search focus: major esports finals / tier-1 tournament stages this week (Worlds, Majors, International, BLAST finals, Valorant Champions, etc.).
-Suggested query: "major esports events this week final schedule"
+            f"""Search focus: major esports finals / tier-1 tournament stages in the next {_radar_horizon_days_en()} days (Worlds, Majors, International, BLAST finals, Valorant Champions, etc.).
+Suggested query: "major esports events final schedule next days"
 
 NOT random regional leagues. International mass audience only.
 {common}
@@ -459,8 +465,8 @@ NOT random regional leagues. International mass audience only.
         ),
         (
             "radar_concerts_streams",
-            f"""Search focus: major concerts, arena/stadium live shows, and large official livestreams this week.
-Suggested query: "major concerts livestream this week"
+            f"""Search focus: major concerts, arena/stadium live shows, and large official livestreams in the next {_radar_horizon_days_en()} days.
+Suggested query: "major concerts livestream schedule"
 
 NOT small club gigs. NOT regular TV. Eurovision is handled elsewhere — skip duplicate here unless a different mega-livestream.
 {common}
@@ -468,7 +474,7 @@ NOT small club gigs. NOT regular TV. Eurovision is handled elsewhere — skip du
         ),
         (
             "radar_week_broad_backup",
-            f"""Search focus: BACKUP — any major bar-TV events in the week window (sports playoffs, UFC, F1, big football, esports finals, Eurovision if in window).
+            f"""Search focus: BACKUP — any major bar-TV events in the {_radar_horizon_days_en()}-day window (sports playoffs, UFC, F1, big football, esports finals, Eurovision if in window).
 Return up to {max_n} DISTINCT items other shards might have missed. Same JSON schema as other shards.
 {common}
 """,
@@ -914,9 +920,9 @@ def _f1_gemini_supplement_prompt() -> str:
     schema = _radar_schema_instructions(10)
     return f"""Find Formula 1 Grand Prix weekend sessions for a bar TV guide (Nha Trang audience).
 
-CURRENT WEEK ONLY ({_week_range_human()}). Use Google Search on official F1.com / race schedule.
+WINDOW {_week_range_human()} ONLY ({_radar_horizon_days_en()} days). Use Google Search on official F1.com / race schedule.
 
-Return separate JSON rows for EACH session this week:
+Return separate JSON rows for EACH session in the window:
 Practice 1, Practice 2, Practice 3 (Free Practice), Sprint Qualifying, Sprint, Qualifying, Race.
 
 Example titles: "Monaco GP - Practice 1", "Monaco Grand Prix - Qualifying".
@@ -999,9 +1005,9 @@ def _ufc_gemini_supplement_prompt() -> str:
     schema = _radar_schema_instructions(8)
     return f"""Find UFC / major MMA cards for a bar TV guide (Nha Trang audience).
 
-CURRENT WEEK ONLY ({_week_range_human()}). Use Google Search on UFC.com / official broadcast listings.
+WINDOW {_week_range_human()} ONLY ({_radar_horizon_days_en()} days). Use Google Search on UFC.com / official broadcast listings.
 
-Return JSON rows for cards in the next 7 days with Main Card start time.
+Return JSON rows for cards in the next {_radar_horizon_days_en()} days with Main Card start time.
 Title must include fighter names: "Fighter A vs. Fighter B" or "UFC Fight Night: A vs. B".
 For US cards use America/New_York or America/Los_Angeles as source_timezone.
 
@@ -1782,29 +1788,31 @@ async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, 
 def format_radar_afisha(
     events: list[dict[str, Any]],
     *,
-    section_title: str = "🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
+    section_title: str | None = None,
     apply_grouping: bool = False,
     now24: bool = False,
 ) -> str:
     """Weekly афиша: подробный список событий (без AI digest / схлопывания)."""
     from event_lock import format_locked_weekly_afisha, lock_events_for_formatter
 
+    from radar_horizon_text import radar_afisha_section_title
+
     prefix = "now24_afisha" if now24 else "weekly_afisha"
     locked = lock_events_for_formatter(events, log_prefix=prefix)
     log.info("FORMATTER RECEIVED EVENTS: count=%s", len(locked))
+    title = section_title or radar_afisha_section_title()
     return format_locked_weekly_afisha(
         locked,
-        section_title=section_title,
+        section_title=title,
         now24=now24,
     )
 
 
 def format_radar_week_message(events: list[dict[str, Any]]) -> str:
-    body = format_radar_afisha(
-        events,
-        section_title="🔥 НА ЭТОЙ НЕДЕЛЕ В GASTROBAR",
-    )
-    return f"🔭 Event Radar · Week\n\n{body}"
+    from radar_horizon_text import radar_afisha_section_title, radar_horizon_days_ru
+
+    body = format_radar_afisha(events, section_title=radar_afisha_section_title())
+    return f"🔭 Event Radar · {radar_horizon_days_ru()}\n\n{body}"
 
 
 def format_radar_now24_message(events: list[dict[str, Any]]) -> str:
@@ -1862,7 +1870,7 @@ def radar_fetch_header(
     if fetch_note == "sports_fallback":
         return "🔭 Event Radar · API-SPORTS (резерв)\nЛимит Gemini исчерпан."
     if fetch_note == "weekly_cache":
-        return "⚡ Event Radar · Next 24h\nИсточник: афиша недели (кэш)."
+        return "⚡ Event Radar · Next 24h\nИсточник: афиша (кэш)."
     if fetch_note == "weekly_cache_today":
         return (
             "📦 Афиша из кэша (собрана сегодня).\n"

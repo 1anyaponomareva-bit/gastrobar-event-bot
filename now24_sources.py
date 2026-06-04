@@ -89,6 +89,7 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
         return []
 
     from sports_events import (
+        _sports_api_fetch_esports,
         get_basketball_events,
         get_esports_events,
         get_football_events_next_days_vn,
@@ -97,17 +98,26 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
     )
 
     log_next24_window_header()
+    now24_days = 2
 
     football_raw = await _now24_from_sport_fetch(
-        get_football_events_next_days_vn(days_ahead=2),
+        get_football_events_next_days_vn(days_ahead=now24_days),
         label="football",
     )
-    hockey_raw = await _now24_from_sport_fetch(get_hockey_events(), label="hockey")
-    basketball_raw = await _now24_from_sport_fetch(
-        get_basketball_events(), label="basketball"
+    hockey_raw = await _now24_from_sport_fetch(
+        get_hockey_events(fetch_days=now24_days), label="hockey"
     )
-    f1_raw = await _now24_from_sport_fetch(get_formula_events(), label="f1")
-    esports_raw = await _now24_from_sport_fetch(get_esports_events(), label="esports")
+    basketball_raw = await _now24_from_sport_fetch(
+        get_basketball_events(fetch_days=now24_days), label="basketball"
+    )
+    f1_raw = await _now24_from_sport_fetch(
+        get_formula_events(fetch_days=now24_days), label="f1"
+    )
+    esports_raw: list[dict[str, Any]] = []
+    if _sports_api_fetch_esports():
+        esports_raw = await _now24_from_sport_fetch(
+            get_esports_events(fetch_days=now24_days), label="esports"
+        )
 
     log.info(
         "NOW24_API RAW COUNTS football=%s hockey=%s basketball=%s f1_rows=%s esports=%s",
