@@ -997,7 +997,8 @@ Return JSON rows for cards in the next 7 days with Main Card start time.
 Title must include fighter names: "Fighter A vs. Fighter B" or "UFC Fight Night: A vs. B".
 For US cards use America/New_York or America/Los_Angeles as source_timezone.
 
-Only confirmed cards with named main event or official Main Card time. No old/historical fights.
+Only confirmed UFC MMA cards (numbered UFC or Fight Night). 
+Do NOT include UFC BJJ, grappling, jiu-jitsu, or Fight Pass-only events.
 
 {schema}
 """
@@ -1601,6 +1602,8 @@ async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, 
     from radar_dedupe import dedupe_events
     from weekly_events_cache import load_weekly_events_cache
 
+    from now24_quality import is_now24_headline_sport, is_now24_junk_event
+
     log_next24_window_header()
 
     merged: list[dict[str, Any]] = []
@@ -1633,6 +1636,20 @@ async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, 
         sources.append(f"ufc_gemini={len(ufc_win)}")
 
     pool = dedupe_events(merged, log_prefix="now24_merge", exact=True)
+    pool = [e for e in pool if not is_now24_junk_event(e)]
+
+    if cached and not any(is_now24_headline_sport(e) for e in pool):
+        for e in cached:
+            if is_now24_junk_event(e):
+                continue
+            if not is_in_next24_window(e, log_checks=False):
+                continue
+            if is_now24_headline_sport(e):
+                pool.append(e)
+        pool = dedupe_events(pool, log_prefix="now24_headline_backfill", exact=True)
+        if pool:
+            sources.append("headline_cache")
+
     fetch_note = ("now24_" + "+".join(sources)) if sources else None
 
     if not pool:

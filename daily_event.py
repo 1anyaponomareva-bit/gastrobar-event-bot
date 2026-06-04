@@ -246,6 +246,20 @@ def _select_now24_balanced(
         key=lambda e: event_start_datetime_vn(e) or datetime.max.replace(tzinfo=TZ),
     )
 
+    from now24_quality import is_now24_headline_sport
+
+    headline_in = [e for e in candidates if is_now24_headline_sport(e)]
+    if headline_in:
+        kept: list[dict[str, Any]] = []
+        esports_n = 0
+        for e in out:
+            if _now24_bucket(e) == "esports":
+                if esports_n >= 1:
+                    continue
+                esports_n += 1
+            kept.append(e)
+        out = kept
+
     log.info(
         "NOW24 FINAL_SELECTED=%s (limit=%s floor=%s candidates=%s)",
         len(out),
@@ -257,8 +271,9 @@ def _select_now24_balanced(
 
 
 def _now24_major_event(ev: dict[str, Any]) -> bool:
-    """F1 / UFC / плей-офф / топ-матчи — не резать жёстким tier/watchability в NOW24."""
+    """F1 / UFC MMA / плей-офф / топ-матчи — не резать жёстким tier/watchability в NOW24."""
     from event_verifier import bar_event_blob
+    from now24_quality import is_now24_ufc_grappling
     from watchability import detect_editorial_type, is_major_weekly_event
 
     et = detect_editorial_type(ev)
@@ -266,10 +281,14 @@ def _now24_major_event(ev: dict[str, Any]) -> bool:
     if et == "f1":
         return True
     if et == "ufc":
+        if is_now24_ufc_grappling(ev):
+            return False
         return True
-    if et == "nhl" and re.search(r"stanley|playoff|conference\s+final|\bfinal\b", b, re.I):
-        return True
-    if et in ("nba", "nhl", "esports"):
+    if et == "nhl":
+        if re.search(r"stanley|playoff|conference\s+final|\bfinal\b", b, re.I):
+            return True
+        return int(ev.get("watchability_score", 0)) >= 32
+    if et == "nba":
         return int(ev.get("watchability_score", 0)) >= 32
     if is_major_weekly_event(ev):
         return True
@@ -307,8 +326,13 @@ def select_now24_events(
             event_start_datetime_vn(ev),
         )
 
+    from now24_quality import is_now24_esports_worthy, is_now24_junk_event
+
     for e in pool:
         ev = enrich_watchability(dict(e))
+        if is_now24_junk_event(ev):
+            _drop("now24_junk", ev)
+            continue
         if gastrobar_hard_reject(ev):
             _drop("hard_reject", ev)
             continue
@@ -380,7 +404,18 @@ def select_now24_events(
             continue
 
         et = detect_editorial_type(ev)
-        if et in ("f1", "ufc", "nhl", "nba", "esports", "live"):
+        if et == "esports":
+            if not is_now24_esports_worthy(ev):
+                _drop("esports_tier2", ev)
+                continue
+            ok_part, part_reason = passes_participant_rules(ev)
+            if not ok_part:
+                _drop(f"participant:{part_reason}", ev)
+                continue
+            candidates.append(enrich_daily_campaign_meta(ev, now))
+            continue
+
+        if et in ("f1", "ufc", "nhl", "nba", "live"):
             ok_part, part_reason = passes_participant_rules(ev)
             if ok_part:
                 candidates.append(enrich_daily_campaign_meta(ev, now))

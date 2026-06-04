@@ -155,13 +155,15 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
             min_watchability=30,
         )
     )
-    out.extend(
-        await _now24_filter_pool(
-            esports_raw,
-            phase="now24_api_esports",
-            min_watchability=28,
-        )
+    from now24_quality import is_now24_esports_worthy
+    from watchability import detect_editorial_type
+
+    esports_filtered = await _now24_filter_pool(
+        esports_raw,
+        phase="now24_api_esports",
+        min_watchability=55,
     )
+    out.extend(e for e in esports_filtered if is_now24_esports_worthy(e))
 
     from radar_dedupe import dedupe_events
 
