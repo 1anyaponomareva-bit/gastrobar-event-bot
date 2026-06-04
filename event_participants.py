@@ -214,12 +214,6 @@ def passes_participant_rules(e: dict[str, Any]) -> tuple[bool, str]:
         return False, "esports_vague"
 
     if _is_ufc_or_boxing(b):
-        if re.search(
-            r"\bbjj\b|jiu[\s-]?jitsu|grappling|brazilian\s+jiu|ufc\s+grappling",
-            b,
-            re.I,
-        ):
-            return False, "ufc_grappling_not_mma"
         if has_matchup_in_title(title):
             return True, "ufc_matchup_title"
         if re.search(r"ufc\s+fight\s+night|main\s+card|main\s+event", b) and re.search(

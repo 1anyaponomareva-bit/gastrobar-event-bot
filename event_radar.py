@@ -997,8 +997,8 @@ Return JSON rows for cards in the next 7 days with Main Card start time.
 Title must include fighter names: "Fighter A vs. Fighter B" or "UFC Fight Night: A vs. B".
 For US cards use America/New_York or America/Los_Angeles as source_timezone.
 
-Only confirmed UFC MMA cards (numbered UFC or Fight Night). 
-Do NOT include UFC BJJ, grappling, jiu-jitsu, or Fight Pass-only events.
+Only confirmed UFC cards with named bouts or official Main Card time (MMA and UFC BJJ).
+Include UFC BJJ events when listed on UFC.com / Fight Pass with start time.
 
 {schema}
 """

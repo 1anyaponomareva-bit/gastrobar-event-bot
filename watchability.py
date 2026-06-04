@@ -450,8 +450,8 @@ def _f1_watchability(b: str) -> tuple[int, str]:
 
 
 def _ufc_watchability(b: str, title: str) -> tuple[int, str]:
-    if re.search(r"\bbjj\b|jiu[\s-]?jitsu|grappling", b) and "ufc" in b:
-        return 5, "ufc_grappling"
+    if re.search(r"\bbjj\b", b) and "ufc" in b and has_matchup_in_title(title):
+        return 68, "ufc_bjj_card"
     if re.search(r"prelim|early\s+prelim", b) and "main" not in b:
         return 18, "prelims_only"
     score = 50

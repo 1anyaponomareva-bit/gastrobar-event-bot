@@ -1,5 +1,5 @@
 """
-Качество выдачи «24 часа»: не BJJ/grappling, не групповые IEM, приоритет F1/NHL/футбол/MMA.
+Качество выдачи «24 часа»: не групповые IEM, приоритет F1/NHL/футбол/UFC (включая BJJ).
 """
 
 from __future__ import annotations
@@ -11,12 +11,6 @@ from event_participants import has_matchup_in_title
 from event_verifier import bar_event_blob
 from watchability import detect_editorial_type
 
-_UFC_GRAPPLING_RE = re.compile(
-    r"\bbjj\b|jiu[\s-]?jitsu|grappling|brazilian\s+jiu|submission\s+grappling|"
-    r"ufc\s+grappling|fight\s+pass\s+only",
-    re.I,
-)
-
 _IEM_GROUP_RE = re.compile(
     r"\biem\b.*\b(?:major|college|cologne|katowice)\b",
     re.I,
@@ -26,11 +20,6 @@ _ESPORTS_FINAL_STAGE_RE = re.compile(
     r"upper\s+bracket\s+final|lower\s+bracket\s+final",
     re.I,
 )
-
-
-def is_now24_ufc_grappling(ev: dict[str, Any]) -> bool:
-    b = bar_event_blob(ev)
-    return bool(_UFC_GRAPPLING_RE.search(b))
 
 
 def is_now24_esports_worthy(ev: dict[str, Any]) -> bool:
@@ -53,9 +42,7 @@ def is_now24_esports_worthy(ev: dict[str, Any]) -> bool:
 
 
 def is_now24_headline_sport(ev: dict[str, Any]) -> bool:
-    """Традиционный спорт для ТВ в баре (не киберспорт)."""
-    if is_now24_ufc_grappling(ev):
-        return False
+    """Традиционный спорт для ТВ в баре (не киберспорт). UFC BJJ — да."""
     et = detect_editorial_type(ev)
     b = bar_event_blob(ev)
     if et == "f1":
@@ -73,8 +60,6 @@ def is_now24_headline_sport(ev: dict[str, Any]) -> bool:
 
 def is_now24_junk_event(ev: dict[str, Any]) -> bool:
     """Не показывать в «24 часа»."""
-    if is_now24_ufc_grappling(ev):
-        return True
     et = detect_editorial_type(ev)
     if et == "esports" and not is_now24_esports_worthy(ev):
         return True

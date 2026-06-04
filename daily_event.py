@@ -271,9 +271,8 @@ def _select_now24_balanced(
 
 
 def _now24_major_event(ev: dict[str, Any]) -> bool:
-    """F1 / UFC MMA / плей-офф / топ-матчи — не резать жёстким tier/watchability в NOW24."""
+    """F1 / UFC (MMA и BJJ) / плей-офф / топ-матчи — не резать жёстким tier в NOW24."""
     from event_verifier import bar_event_blob
-    from now24_quality import is_now24_ufc_grappling
     from watchability import detect_editorial_type, is_major_weekly_event
 
     et = detect_editorial_type(ev)
@@ -281,8 +280,6 @@ def _now24_major_event(ev: dict[str, Any]) -> bool:
     if et == "f1":
         return True
     if et == "ufc":
-        if is_now24_ufc_grappling(ev):
-            return False
         return True
     if et == "nhl":
         if re.search(r"stanley|playoff|conference\s+final|\bfinal\b", b, re.I):
