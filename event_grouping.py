@@ -218,15 +218,16 @@ def apply_grouping_for_weekly_display(
 
 
 def format_parallel_block_lines(e: dict[str, Any]) -> list[str]:
+    from event_afisha_display import format_afisha_when
+
     em = str(e.get("emoji", "⚽")).strip()
-    wd = str(e.get("weekday", "")).strip()
-    tm = str(e.get("display_time") or e.get("time", "")).strip()
+    when = format_afisha_when(e)
     headline = str(e.get("block_headline") or e.get("title", "")).strip()
     matches: list[str] = list(e.get("block_matches") or [])
     note = str(e.get("block_note", "")).strip()
     extra = int(e.get("block_match_count", 0)) - len(matches)
 
-    lines = [f"{em} {wd} {tm}", headline, ""]
+    lines = [f"{em} {when}", headline, ""]
     for m in matches:
         if m:
             lines.append(m)

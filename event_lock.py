@@ -227,6 +227,7 @@ def format_locked_weekly_afisha(
     Чистое Python-форматирование locked списка (без Gemini).
     Группировка EPL matchday — только на этапе отображения, lock_id сохраняются.
     """
+    from event_afisha_display import format_afisha_when
     from event_grouping import apply_grouping_for_weekly_display, format_parallel_block_lines
 
     if not locked:
@@ -244,15 +245,14 @@ def format_locked_weekly_afisha(
             continue
 
         em = str(e.get("emoji", "🏟")).strip()
-        wd = str(e.get("local_weekday") or e.get("weekday", "")).strip()
-        tm = str(e.get("local_time") or e.get("display_time", "")).strip()
+        when = format_afisha_when(e)
         title = _normalize_now24_match_title(
             str(e.get("title", "")).strip(),
             now24=now24,
         )
         sub = str(e.get("subtitle", e.get("league", ""))).strip()
 
-        lines.append(f"{em} {wd} {tm}")
+        lines.append(f"{em} {when}")
         lines.append(title)
         if sub and sub.lower() not in title.lower():
             lines.append(sub)
