@@ -80,6 +80,7 @@ _HARD_TZ_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"bundesliga", re.I), "Europe/Berlin"),
     (re.compile(r"ligue\s+1", re.I), "Europe/Paris"),
     (re.compile(r"eurovision", re.I), "Europe/Zurich"),
+    (re.compile(r"monaco|monte\s*carlo", re.I), "Europe/Monaco"),
     (re.compile(r"formula\s*1|\bf1\b|grand\s+prix", re.I), "Europe/London"),
     (re.compile(r"canadian\s+gp|canada\s+gp|montreal", re.I), "America/Toronto"),
     (re.compile(r"\bnba\b", re.I), "America/New_York"),
@@ -210,6 +211,68 @@ def reconcile_utc_datetime(
     return utc_from_field
 
 
+def _apply_f1_monaco_session_vn_fix(event: dict[str, Any]) -> dict[str, Any]:
+    """
+    Monaco GP: Europe/Monaco → VN. FP1 ~13:30 локально = 18:30 во Вьетнаме.
+    Исправляет ошибочные 03:30Z / Europe/London (утро в VN).
+    """
+    b = _event_blob(event)
+    if not re.search(r"monaco|monte\s*carlo", b, re.I):
+        return event
+    if not re.search(
+        r"formula\s*1|\bf1\b|grand\s+prix|practice|qualifying|sprint|\brace\b",
+        b,
+        re.I,
+    ):
+        return event
+
+    loc_t = str(event.get("local_time") or event.get("time", "")).strip().removeprefix("≈")
+    m = _TIME_RE.match(loc_t)
+    if not m:
+        return event
+    hour = int(m.group(1))
+    if hour >= 17:
+        return event
+
+    source_date = str(event.get("local_date") or event.get("date", "")).strip()
+    if not _DATE_RE.match(source_date):
+        return event
+
+    wall = "13:30"
+    if re.search(r"qualifying|qualification", b, re.I):
+        wall = "16:00"
+    elif re.search(r"\brace\b", b, re.I) and not re.search(r"practice", b, re.I):
+        wall = "15:00"
+    elif re.search(r"practice\s*3|\bfp3\b", b, re.I):
+        wall = "12:30"
+
+    try:
+        utc_dt = source_to_utc_datetime(source_date, wall, "Europe/Monaco")
+    except Exception:
+        return event
+
+    fields = utc_datetime_to_local_fields(utc_dt)
+    out = dict(event)
+    out.update(fields)
+    out["original_date"] = source_date
+    out["original_time"] = wall
+    out["original_timezone"] = "Europe/Monaco"
+    out["source_timezone"] = "Europe/Monaco"
+    tm = out["local_time"]
+    out["time_display"] = tm
+    out["display_time"] = tm
+    log.warning(
+        "F1 Monaco session VN fix: title=%r was %s -> %s %s (Europe/Monaco %s %s)",
+        event.get("title"),
+        loc_t,
+        out.get("local_weekday"),
+        tm,
+        source_date,
+        wall,
+    )
+    return out
+
+
 def establish_schedule(
     event: dict[str, Any],
     *,
@@ -224,8 +287,9 @@ def establish_schedule(
     if out.get("time_locked") and str(out.get("utc_datetime", "")).strip():
         loc = parse_datetime_iso(str(out.get("local_datetime", "")))
         if loc is not None and loc.tzinfo is not None:
-            log_event_debug(out, phase=f"{phase}:already_locked")
-            return out
+            fixed = _apply_f1_monaco_session_vn_fix(out)
+            log_event_debug(fixed, phase=f"{phase}:already_locked")
+            return fixed
 
     # API-SPORTS: fixture UTC уже Zulu — не reconcile через Europe/London
     if str(out.get("utc_authority", "")).lower() == "api_sports":
@@ -266,6 +330,9 @@ def establish_schedule(
 
     fields = utc_datetime_to_local_fields(utc_dt)
     out.update(fields)
+
+    out = _apply_f1_monaco_session_vn_fix(out)
+
     out["original_date"] = source_date or out.get("original_date", "")
     out["original_time"] = source_time or out.get("original_time", "")
     out["original_timezone"] = trusted_tz
