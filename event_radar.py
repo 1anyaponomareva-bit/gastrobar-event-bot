@@ -211,8 +211,16 @@ def _enrich_ufc_for_afisha(e: dict[str, Any]) -> dict[str, Any]:
     if not (is_main or has_bout):
         return e
 
-    e["subtitle"] = "Main Card"
-    e["league"] = "Main Card"
+    if re.search(r"\bbjj\b", b, re.I):
+        sub = str(e.get("subtitle") or e.get("league") or "").strip()
+        if not sub or sub.lower() == "none":
+            e["subtitle"] = "UFC BJJ · Main Card"
+            e["league"] = e["subtitle"]
+    elif not str(e.get("subtitle") or "").strip() or str(e.get("subtitle", "")).lower() == "none":
+        e["subtitle"] = "Main Card"
+        e["league"] = "Main Card"
+    elif not str(e.get("league") or "").strip() or str(e.get("league", "")).lower() == "none":
+        e["league"] = str(e.get("subtitle", "Main Card")).strip() or "Main Card"
     if has_bout:
         e["ufc_main_note"] = "Главный бой ориентировочно позже"
     if str(e.get("time_precision", "")) != "unknown":

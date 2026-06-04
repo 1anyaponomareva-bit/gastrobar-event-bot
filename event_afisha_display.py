@@ -31,6 +31,18 @@ def _event_local_date(e: dict[str, Any]) -> date | None:
     return None
 
 
+def afisha_subtitle(e: dict[str, Any]) -> str:
+    """Подзаголовок афиши; не показывать None/пустое."""
+    for key in ("subtitle", "league"):
+        raw = e.get(key)
+        if raw is None:
+            continue
+        t = str(raw).strip()
+        if t and t.lower() != "none":
+            return t
+    return ""
+
+
 def format_afisha_when(
     e: dict[str, Any],
     *,
