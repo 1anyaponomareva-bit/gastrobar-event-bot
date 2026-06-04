@@ -930,9 +930,9 @@ Do NOT omit practice sessions. Exact date + time + source_timezone from official
 
 def _fetch_f1_gemini_supplement_sync() -> tuple[list[dict[str, Any]], int, str | None]:
     """Один Gemini Search только для F1 (дополнение к API-first)."""
-    from gemini_usage import should_skip_gemini_discovery_sync
+    from gemini_usage import should_skip_gemini_supplement_sync
 
-    if not GEMINI_API_KEY or should_skip_gemini_discovery_sync():
+    if not GEMINI_API_KEY or should_skip_gemini_supplement_sync():
         return [], 0, None
     try:
         prelim, raw, note = _gemini_fetch_with_search_fallback(
@@ -1014,9 +1014,9 @@ Include UFC BJJ events when listed on UFC.com / Fight Pass with start time.
 
 def _fetch_ufc_gemini_supplement_sync() -> tuple[list[dict[str, Any]], int, str | None]:
     """Один Gemini Search только для UFC (дополнение now24)."""
-    from gemini_usage import should_skip_gemini_discovery_sync
+    from gemini_usage import should_skip_gemini_supplement_sync
 
-    if not GEMINI_API_KEY or should_skip_gemini_discovery_sync():
+    if not GEMINI_API_KEY or should_skip_gemini_supplement_sync():
         return [], 0, None
     try:
         prelim, raw, note = _gemini_fetch_with_search_fallback(
@@ -1385,11 +1385,25 @@ async def _fetch_radar_pipeline(
         return final_pre, api_raw, [], fetch_note
 
     if fetch_note == "gemini_quota":
+        supplement = await _week_from_gemini_supplements()
+        if supplement:
+            return supplement, max(api_raw, 1), [], "gemini_supplement_week"
         fallback, fb_raw = await _fallback_events_from_sports_api()
         if fallback:
             return fallback, fb_raw, [], "sports_fallback"
         if api_seed:
             return api_seed, api_raw, [], "sports_fallback"
+
+    if not prelim and not api_seed and fetch_note in (
+        "gemini_error",
+        "search_fallback",
+        "gemini_overloaded",
+        None,
+    ):
+        supplement = await _week_from_gemini_supplements()
+        if supplement:
+            log.info("Event Radar pipeline: gemini supplement only (%s)", len(supplement))
+            return supplement, max(gemini_raw, 1), [], "gemini_supplement_week"
 
     results = await asyncio.gather(*[verify_event(e) for e in prelim])
     from locked_time import has_locked_schedule, lock_event_schedule
@@ -1528,6 +1542,21 @@ def _finalize_week_selection(pool: list[dict[str, Any]], prelim: list[dict[str, 
     return final
 
 
+async def _week_from_gemini_supplements() -> list[dict[str, Any]]:
+    """F1 + UFC из Gemini, когда API-SPORTS пустой/заблокирован."""
+    f1_extra, ufc_extra = await asyncio.gather(
+        _fetch_f1_gemini_verified_events(),
+        _fetch_ufc_gemini_verified_events(),
+    )
+    merged = _dedupe_radar_candidates((f1_extra or []) + (ufc_extra or []))
+    if not merged:
+        return []
+    from radar_current_week import filter_radar_events
+
+    out = filter_radar_events(merged, phase="week_supplement", allow_gemini_discovery=True)
+    return _finalize_week_selection(out, [])
+
+
 async def get_event_radar_week(
     *,
     force_refresh: bool = False,
@@ -1582,7 +1611,14 @@ async def get_event_radar_week(
         fetch_note,
     )
 
-    if not final and fetch_note in ("gemini_quota", "gemini_error", "gemini_overloaded"):
+    if not final and fetch_note in (
+        "gemini_quota",
+        "gemini_error",
+        "gemini_overloaded",
+        "search_fallback",
+        "no_candidates",
+        "verification_failed",
+    ):
         cached = await get_weekly_events_cache_for_display()
         if cached:
             return (
@@ -1592,10 +1628,32 @@ async def get_event_radar_week(
                 len(cached),
                 "weekly_cache_quota",
             )
+        supplement = await _week_from_gemini_supplements()
+        if supplement:
+            await save_weekly_events_cache(supplement, source="gemini_supplement_week")
+            return (
+                supplement,
+                len(supplement),
+                len(supplement),
+                len(supplement),
+                "gemini_supplement_week",
+            )
         fallback, fb_raw = await _fallback_events_from_sports_api()
         if fallback:
             await save_weekly_events_cache(fallback, source="sports_fallback")
             return fallback, fb_raw, 0, len(fallback), "sports_fallback"
+
+    if not final:
+        cached = await get_weekly_events_cache_for_display()
+        if cached:
+            log.info("Event Radar week: empty fetch → stale cache (%s)", len(cached))
+            return (
+                cached,
+                len(cached),
+                len(cached),
+                len(cached),
+                "weekly_cache_fallback",
+            )
 
     if final:
         await save_weekly_events_cache(final, source="weekly_radar")
@@ -1812,6 +1870,10 @@ def radar_fetch_header(
         )
     if fetch_note == "weekly_cache_quota":
         return "⚠️ Gemini лимит исчерпан. Показываю последнюю сохранённую афишу."
+    if fetch_note == "weekly_cache_fallback":
+        return "📦 Афиша из кэша (API/Gemini недоступны — последняя подборка)."
+    if fetch_note == "gemini_supplement_week":
+        return "🔭 Event Radar · F1/UFC (Gemini)\nAPI-SPORTS недоступен."
     if fetch_note == "api_sports_now24":
         return _now24_api_sports_source_header(events)
     if fetch_note and fetch_note.startswith("now24_"):

@@ -5,7 +5,7 @@ from __future__ import annotations
 from config import GEMINI_API_KEY, RUN_MODE, is_local_run, is_railway_run
 
 # Меняйте при деплое — по этой метке видно, какой код ответил в Telegram.
-BOT_BUILD_ID = "f1-monaco-vn-time-20260605"
+BOT_BUILD_ID = "radar-fallback-api-gemini-20260605"
 
 GEMINI_TROUBLESHOOT = (
     "Проверьте GEMINI_API_KEY через /check и посмотрите логи в терминале, "
@@ -19,7 +19,7 @@ _RADAR_REASON_RU: dict[str, str] = {
     "timeout": "timeout",
     "no_candidates": "no candidates",
     "verification_failed": "verification failed",
-    "api_filter_empty": "API events dropped by filters (tier/score)",
+    "api_sports_unavailable": "API-SPORTS suspended or rate-limited",
     "unexpected_error": "unexpected error",
 }
 
@@ -52,6 +52,12 @@ def event_radar_error_message(reason: str) -> str:
         body = (
             "API-SPORTS вернул события, но все отфильтрованы (tier/score/watchability). "
             "Проверьте RADAR_MIN_WATCHABILITY и логи Railway.\n\n"
+            f"{runtime_logs_hint()}"
+        )
+    elif reason == "api_sports_unavailable":
+        body = (
+            "API-SPORTS недоступен (аккаунт suspended или rate limit). "
+            "Бот попробует кэш и Gemini F1/UFC supplement.\n\n"
             f"{runtime_logs_hint()}"
         )
     else:
@@ -94,6 +100,10 @@ def resolve_radar_error_code(
     if raw_total == 0 or prelim_count == 0:
         if fetch_note in ("gemini_error", "search_fallback"):
             return "gemini_search_failed"
+        if fetch_note in ("gemini_quota",):
+            return "gemini_quota"
+        if fetch_note == "api_first" and selected == 0:
+            return "api_filter_empty"
         return "no_candidates"
     if selected == 0 and prelim_count > 0:
         return "verification_failed"

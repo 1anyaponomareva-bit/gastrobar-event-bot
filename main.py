@@ -291,39 +291,36 @@ async def _answer_radar_empty(
     from runtime_messages import event_radar_error_message, resolve_radar_error_code
     from weekly_events_cache import get_weekly_events_cache_for_display
 
-    if fetch_note in (
-        "gemini_quota",
-        "gemini_error",
-        "gemini_overloaded",
-        "search_fallback",
-        "verification_failed",
-        "weekly_cache_quota",
-    ):
-        cached = await get_weekly_events_cache_for_display()
-        if cached:
-            quota_hint = ""
-            if fetch_note == "gemini_quota":
-                quota_hint = (
-                    "\n⚠️ Лимит Gemini (≈20 запросов/день на free tier) — "
-                    "времена могут быть старыми. Завтра нажмите «Обновить неделю»."
-                )
-            if fetch_note == "weekly_cache_quota":
-                hdr = (
-                    f"📦 Афиша из кэша ({len(cached)} событий).\n"
-                    "⚠️ Gemini лимит исчерпан. Показываю последнюю сохранённую афишу."
-                )
-            elif fetch_note == "gemini_overloaded":
-                hdr = (
-                    f"📦 Афиша из кэша ({len(cached)} событий).\n"
-                    "Gemini сейчас перегружен (503) — свежий поиск не прошёл."
-                )
-            else:
-                hdr = (
-                    f"📦 Афиша из кэша ({len(cached)} событий).\n"
-                    "Свежий поиск не удался — показана сохранённая подборка."
-                ) + quota_hint
-            await _deliver_weekly_cache(message, user_id, cached, header=hdr)
-            return
+    cached = await get_weekly_events_cache_for_display()
+    if cached:
+        quota_hint = ""
+        if fetch_note == "gemini_quota":
+            quota_hint = (
+                "\n⚠️ Лимит Gemini (≈20 запросов/день на free tier) — "
+                "времена могут быть старыми. Завтра нажмите «Обновить неделю»."
+            )
+        if fetch_note == "weekly_cache_quota":
+            hdr = (
+                f"📦 Афиша из кэша ({len(cached)} событий).\n"
+                "⚠️ Gemini лимит исчерпан. Показываю последнюю сохранённую афишу."
+            )
+        elif fetch_note == "gemini_overloaded":
+            hdr = (
+                f"📦 Афиша из кэша ({len(cached)} событий).\n"
+                "Gemini сейчас перегружен (503) — свежий поиск не прошёл."
+            )
+        elif fetch_note == "gemini_supplement_week":
+            hdr = (
+                f"📦 Афиша из Gemini supplement ({len(cached)} событий).\n"
+                "API-SPORTS недоступен — F1/UFC из поиска."
+            )
+        else:
+            hdr = (
+                f"📦 Афиша из кэша ({len(cached)} событий).\n"
+                "Свежий поиск не удался — показана сохранённая подборка."
+            ) + quota_hint
+        await _deliver_weekly_cache(message, user_id, cached, header=hdr)
+        return
 
     if fetch_note == "gemini_quota":
         await message.answer(

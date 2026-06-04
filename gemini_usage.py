@@ -20,8 +20,9 @@ VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 _lock = threading.Lock()
 _last_call_monotonic: float = 0.0
 
-# Запас ниже лимита 20 RPD / 5 RPM на free tier
-GEMINI_FREE_RPD_SAFE = int(os.getenv("GEMINI_FREE_RPD_SAFE", "17") or "17")
+# Weekly discovery — стоп раньше; F1/UFC supplement — отдельный потолок
+GEMINI_DISCOVERY_RPD_SAFE = int(os.getenv("GEMINI_DISCOVERY_RPD_SAFE", "15") or "15")
+GEMINI_SUPPLEMENT_RPD_MAX = int(os.getenv("GEMINI_SUPPLEMENT_RPD_MAX", "20") or "20")
 GEMINI_FREE_RPM_MIN_INTERVAL = float(
     os.getenv("GEMINI_FREE_RPM_MIN_INTERVAL", "13") or "13"
 )
@@ -86,11 +87,15 @@ def wait_gemini_rpm_slot_sync() -> None:
 
 
 def should_skip_gemini_discovery_sync() -> bool:
-    return get_gemini_calls_today_sync() >= GEMINI_FREE_RPD_SAFE
+    return get_gemini_calls_today_sync() >= GEMINI_DISCOVERY_RPD_SAFE
+
+
+def should_skip_gemini_supplement_sync() -> bool:
+    return get_gemini_calls_today_sync() >= GEMINI_SUPPLEMENT_RPD_MAX
 
 
 def gemini_quota_remaining_sync() -> int:
-    return max(0, GEMINI_FREE_RPD_SAFE - get_gemini_calls_today_sync())
+    return max(0, GEMINI_DISCOVERY_RPD_SAFE - get_gemini_calls_today_sync())
 
 
 def can_make_gemini_call_sync(*, purpose: str) -> tuple[bool, str]:
@@ -110,3 +115,9 @@ async def should_skip_gemini_discovery() -> bool:
     import asyncio
 
     return await asyncio.to_thread(should_skip_gemini_discovery_sync)
+
+
+async def should_skip_gemini_supplement() -> bool:
+    import asyncio
+
+    return await asyncio.to_thread(should_skip_gemini_supplement_sync)

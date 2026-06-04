@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from datetime import date, datetime, timedelta, time as dtime
 from typing import Any, Literal
@@ -27,6 +28,15 @@ def _today() -> date:
 def _week_dates() -> tuple[date, date]:
     start = _today()
     return start, start + timedelta(days=7)
+
+
+def _weekly_api_fetch_days() -> int:
+    """Меньше параллельных запросов — free tier API-SPORTS (rate limit)."""
+    return max(1, min(7, int(os.getenv("WEEKLY_API_FETCH_DAYS", "3") or "3")))
+
+
+def _weekly_api_dates() -> list[date]:
+    return [_today() + timedelta(days=i) for i in range(_weekly_api_fetch_days())]
 
 
 _IMPORTANCE_ORDER = {"high": 0, "medium": 1, "low": 2}
@@ -1383,7 +1393,7 @@ async def get_football_events() -> list[dict[str, Any]]:
 
     # Free plan: from/to недоступен — запрашиваем по date=; дни параллельно, чтобы /week не «висел» минутами.
     chunks = await asyncio.gather(
-        *[one_day(start + timedelta(days=i)) for i in range(7)],
+        *[one_day(d) for d in _weekly_api_dates()],
         return_exceptions=True,
     )
     events: list[dict[str, Any]] = []
@@ -1448,7 +1458,7 @@ async def get_basketball_events() -> list[dict[str, Any]]:
         return day_events
 
     chunks = await asyncio.gather(
-        *[one_day(start + timedelta(days=i)) for i in range(7)],
+        *[one_day(d) for d in _weekly_api_dates()],
         return_exceptions=True,
     )
     events: list[dict[str, Any]] = []
@@ -1513,7 +1523,7 @@ async def get_hockey_events() -> list[dict[str, Any]]:
         return day_events
 
     chunks = await asyncio.gather(
-        *[one_day(start + timedelta(days=i)) for i in range(7)],
+        *[one_day(d) for d in _weekly_api_dates()],
         return_exceptions=True,
     )
     events: list[dict[str, Any]] = []
@@ -1607,7 +1617,7 @@ async def get_esports_events() -> list[dict[str, Any]]:
         return collected
 
     chunks = await asyncio.gather(
-        *[one_day(start + timedelta(days=i)) for i in range(7)],
+        *[one_day(d) for d in _weekly_api_dates()],
         return_exceptions=True,
     )
     events: list[dict[str, Any]] = []
@@ -1659,7 +1669,7 @@ async def get_formula_events() -> list[dict[str, Any]]:
         return day_events
 
     chunks = await asyncio.gather(
-        *[one_day(start + timedelta(days=i)) for i in range(7)],
+        *[one_day(d) for d in _weekly_api_dates()],
         return_exceptions=True,
     )
     events: list[dict[str, Any]] = []
