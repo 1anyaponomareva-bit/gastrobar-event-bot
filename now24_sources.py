@@ -152,7 +152,7 @@ async def fetch_now24_from_api_sports() -> list[dict[str, Any]]:
         await _now24_filter_pool(
             f1_raw,
             phase="now24_api_f1",
-            min_watchability=38,
+            min_watchability=30,
         )
     )
     out.extend(

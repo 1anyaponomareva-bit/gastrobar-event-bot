@@ -256,6 +256,20 @@ def _select_now24_balanced(
     return out
 
 
+def _now24_major_event(ev: dict[str, Any]) -> bool:
+    """F1 / плей-офф / топ-матчи — не резать жёстким tier/watchability в NOW24."""
+    from watchability import detect_editorial_type, is_major_weekly_event
+
+    et = detect_editorial_type(ev)
+    if et == "f1":
+        return True
+    if et in ("nba", "nhl", "ufc", "esports"):
+        return int(ev.get("watchability_score", 0)) >= 38
+    if is_major_weekly_event(ev):
+        return True
+    return False
+
+
 def select_now24_events(
     events: list[dict[str, Any]] | None = None,
     *,
@@ -271,16 +285,42 @@ def select_now24_events(
     now = now or _vn_now()
     pool = events or []
     candidates: list[dict[str, Any]] = []
+    drop_stats: dict[str, int] = {}
 
     log_next24_window_header(now)
 
     from config import NOW24_FOOTBALL_MIN_WATCHABILITY
     from football_watchability import football_watchability_score, is_eligible_football_league_now24
 
+    def _drop(reason: str, ev: dict[str, Any]) -> None:
+        drop_stats[reason] = drop_stats.get(reason, 0) + 1
+        log.info(
+            "NOW24_DROP reason=%s title=%r local=%s",
+            reason,
+            ev.get("title"),
+            event_start_datetime_vn(ev),
+        )
+
     for e in pool:
         ev = enrich_watchability(dict(e))
         if gastrobar_hard_reject(ev):
+            _drop("hard_reject", ev)
             continue
+
+        if not is_in_next24_window(ev, now=now, log_checks=False):
+            _drop("outside_window", ev)
+            continue
+
+        major = _now24_major_event(ev) or has_locked_schedule(ev)
+
+        if major:
+            ok_part, part_reason = passes_participant_rules(ev)
+            if not ok_part:
+                _drop(f"participant:{part_reason}", ev)
+                continue
+            candidates.append(enrich_daily_campaign_meta(ev, now))
+            continue
+
         if str(ev.get("category", "")).upper() == "FOOTBALL" and ev.get("league_id") is not None:
             item = {
                 "league_id": ev.get("league_id"),
@@ -289,29 +329,42 @@ def select_now24_events(
                 "title": ev.get("title", ""),
             }
             if not is_eligible_football_league_now24(item):
+                _drop("football_league", ev)
                 continue
             fb_score, _ = football_watchability_score(item, ev)
             if fb_score < NOW24_FOOTBALL_MIN_WATCHABILITY:
+                _drop("football_score", ev)
                 continue
             ev["football_watchability_score"] = fb_score
         if has_locked_schedule(ev):
-            ok_part, _ = passes_participant_rules(ev)
+            ok_part, part_reason = passes_participant_rules(ev)
             if not ok_part:
+                _drop(f"participant:{part_reason}", ev)
                 continue
         elif str(ev.get("verified_via", "")).upper() == "API-SPORTS":
             if gastrobar_hard_reject(ev):
+                _drop("hard_reject", ev)
                 continue
-            ok_part, _ = passes_participant_rules(ev)
+            ok_part, part_reason = passes_participant_rules(ev)
             if not ok_part:
+                _drop(f"participant:{part_reason}", ev)
                 continue
         else:
-            if int(ev.get("radar_tier", 99)) >= 99 and int(ev.get("watchability_score", 0)) < 52:
+            if int(ev.get("radar_tier", 99)) >= 99 and int(ev.get("watchability_score", 0)) < 45:
+                _drop("low_watchability", ev)
                 continue
             if not is_gastrobar_eligible(ev):
+                _drop("not_eligible", ev)
                 continue
-        if not is_in_next24_window(ev, now=now, log_checks=True):
-            continue
         candidates.append(enrich_daily_campaign_meta(ev, now))
+
+    log.info(
+        "NOW24_FILTER pool_in=%s candidates=%s drops=%s sample=%s",
+        len(pool),
+        len(candidates),
+        drop_stats,
+        [str(c.get("title", ""))[:50] for c in candidates[:12]],
+    )
 
     if not candidates:
         return []

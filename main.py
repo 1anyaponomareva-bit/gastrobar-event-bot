@@ -97,7 +97,13 @@ def _ru_found_events_line(n: int) -> str:
     return f"Найдено {n} {w}."
 
 
-def _ru_selected_main_line(n: int) -> str:
+def _ru_selected_main_line(n: int, *, mode: str = "week") -> str:
+    if mode == "now24":
+        if n % 10 == 1 and n % 100 != 11:
+            return f"Выбрано {n} событие на ближайшие 24 часа."
+        if 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20):
+            return f"Выбрано {n} события на ближайшие 24 часа."
+        return f"Выбрано {n} событий на ближайшие 24 часа."
     if n % 10 == 1 and n % 100 != 11:
         return f"Выбрано {n} главное событие недели."
     if 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20):
@@ -481,8 +487,11 @@ async def _run_radar_mode(
         )
 
         extra = radar_fetch_header(fetch_note, events if mode == "now24" else None)
-        found_n = pre_count if mode == "week" and pre_count else raw_total
-        stats = f"{_ru_found_events_line(found_n)}\n{_ru_selected_main_line(selected)}"
+        found_n = pre_count if pre_count else raw_total
+        stats = (
+            f"{_ru_found_events_line(found_n)}\n"
+            f"{_ru_selected_main_line(selected, mode=mode)}"
+        )
         body = (
             format_radar_week_message(events)
             if mode == "week"

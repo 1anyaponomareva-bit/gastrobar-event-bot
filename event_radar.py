@@ -1531,47 +1531,76 @@ async def get_event_radar_week(
 
 
 async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, str | None]:
-    """События ближайших 24 ч: API-SPORTS (football) → cache → pipeline."""
+    """NOW24: merge API + weekly cache (только окно 24 ч) + F1 Gemini supplement."""
     from daily_event import select_now24_events, select_nearest_upcoming
-    from next24 import log_next24_window_header
+    from next24 import is_in_next24_window, log_next24_window_header
     from now24_sources import fetch_now24_from_api_sports
+    from radar_dedupe import dedupe_events
     from weekly_events_cache import load_weekly_events_cache
 
     log_next24_window_header()
 
+    merged: list[dict[str, Any]] = []
+    sources: list[str] = []
+
     api_pool = await fetch_now24_from_api_sports()
     if api_pool:
-        final = select_now24_events(api_pool)
-        if final:
-            log.info("Event Radar now24 from API-SPORTS: %s", len(final))
-            return final, len(api_pool), len(api_pool), len(final), "api_sports_now24"
+        merged.extend(api_pool)
+        sources.append(f"api={len(api_pool)}")
 
     cached = await load_weekly_events_cache()
     if cached:
-        final = select_now24_events(cached)
-        log.info(
-            "Event Radar now24 from weekly cache: pool=%s final=%s",
-            len(cached),
-            len(final),
+        cache_win = [
+            e for e in cached if is_in_next24_window(e, log_checks=False)
+        ]
+        merged.extend(cache_win)
+        sources.append(f"cache_24h={len(cache_win)}/{len(cached)}")
+
+    f1_extra = await _fetch_f1_gemini_verified_events()
+    if f1_extra:
+        f1_win = [e for e in f1_extra if is_in_next24_window(e, log_checks=False)]
+        merged.extend(f1_win)
+        sources.append(f"f1_gemini={len(f1_win)}")
+
+    pool = dedupe_events(merged, log_prefix="now24_merge", exact=True)
+    fetch_note = ("now24_" + "+".join(sources)) if sources else None
+
+    if not pool:
+        pipe_pool, raw_total, prelim, pipe_note = await _fetch_radar_pipeline()
+        pool = dedupe_events(
+            [e for e in pipe_pool if is_in_next24_window(e, log_checks=False)],
+            log_prefix="now24_pipeline",
         )
-        if final:
-            return final, len(cached), len(cached), len(final), "weekly_cache"
+        fetch_note = pipe_note
+        log.info(
+            "Event Radar now24 pipeline fallback: raw=%s in_window=%s",
+            raw_total,
+            len(pool),
+        )
 
-    pool, raw_total, prelim, fetch_note = await _fetch_radar_pipeline()
-    final = select_now24_events(pool)
-    if final:
-        log.info("Event Radar now24 pipeline final=%s", len(final))
-        return final, raw_total, len(prelim), len(final), fetch_note
-
-    if cached:
+    if not pool and cached:
         upcoming = select_nearest_upcoming(cached, within_days=2)
-        final = select_now24_events(upcoming)
-        if final:
-            log.info("Event Radar now24 nearest from cache: %s", len(final))
-            return final, len(cached), len(cached), len(final), "weekly_cache_upcoming"
+        pool = [
+            e for e in upcoming if is_in_next24_window(e, log_checks=False)
+        ]
+        if pool:
+            fetch_note = "weekly_cache_upcoming"
 
-    log.info("Event Radar now24: empty (cache=%s api=%s pool=%s)", len(cached), len(api_pool), len(pool))
-    return [], raw_total, len(prelim), 0, fetch_note
+    log.info(
+        "NOW24_MERGED_POOL=%s sources=%s sample=%s",
+        len(pool),
+        sources,
+        [str(e.get("title", ""))[:45] for e in pool[:15]],
+    )
+
+    final = select_now24_events(pool)
+    log.info(
+        "Event Radar now24: pool_in_window=%s final=%s note=%s",
+        len(pool),
+        len(final),
+        fetch_note,
+    )
+    return final, len(pool), len(pool), len(final), fetch_note
 
 
 def format_radar_afisha(
@@ -1667,6 +1696,8 @@ def radar_fetch_header(
         return "⚠️ Gemini лимит исчерпан. Показываю последнюю сохранённую афишу."
     if fetch_note == "api_sports_now24":
         return _now24_api_sports_source_header(events)
+    if fetch_note and fetch_note.startswith("now24_"):
+        return f"⚡ Event Radar · Next 24h\nИсточник: {fetch_note.replace('now24_', '', 1)}"
     return ""
 
 
