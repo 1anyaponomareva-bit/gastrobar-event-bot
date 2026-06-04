@@ -248,7 +248,7 @@ def _select_now24_balanced(
 
     from now24_quality import is_now24_headline_sport
 
-    headline_in = [e for e in candidates if is_now24_headline_sport(e)]
+    headline_in = [e for e in candidates if is_now24_core_headline_sport(e)]
     if headline_in:
         kept: list[dict[str, Any]] = []
         esports_n = 0
@@ -323,7 +323,7 @@ def select_now24_events(
             event_start_datetime_vn(ev),
         )
 
-    from now24_quality import is_now24_esports_worthy, is_now24_junk_event
+    from now24_quality import is_now24_core_headline_sport, is_now24_esports_worthy, is_now24_junk_event
 
     for e in pool:
         ev = enrich_watchability(dict(e))

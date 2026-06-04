@@ -41,6 +41,20 @@ def is_now24_esports_worthy(ev: dict[str, Any]) -> bool:
     return ws >= 80
 
 
+def is_ufc_bjj_event(ev: dict[str, Any]) -> bool:
+    b = bar_event_blob(ev)
+    return bool(re.search(r"\bufc\b.*\bbjj\b|\bbjj\b.*\bufc\b", b, re.I))
+
+
+def is_now24_core_headline_sport(ev: dict[str, Any]) -> bool:
+    """F1 / NHL / футбол / MMA-UFC — для добора; UFC BJJ не блокирует поиск других."""
+    if is_now24_junk_event(ev):
+        return False
+    if is_ufc_bjj_event(ev):
+        return False
+    return is_now24_headline_sport(ev)
+
+
 def is_now24_headline_sport(ev: dict[str, Any]) -> bool:
     """Традиционный спорт для ТВ в баре (не киберспорт). UFC BJJ — да."""
     et = detect_editorial_type(ev)

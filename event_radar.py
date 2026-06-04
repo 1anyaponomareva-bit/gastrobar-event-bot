@@ -1602,7 +1602,11 @@ async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, 
     from radar_dedupe import dedupe_events
     from weekly_events_cache import load_weekly_events_cache
 
-    from now24_quality import is_now24_headline_sport, is_now24_junk_event
+    from now24_quality import (
+        is_now24_core_headline_sport,
+        is_now24_headline_sport,
+        is_now24_junk_event,
+    )
 
     log_next24_window_header()
 
@@ -1636,7 +1640,26 @@ async def get_event_radar_now24() -> tuple[list[dict[str, Any]], int, int, int, 
         sources.append(f"ufc_gemini={len(ufc_win)}")
 
     pool = dedupe_events(merged, log_prefix="now24_merge", exact=True)
+    pre_junk = len(pool)
     pool = [e for e in pool if not is_now24_junk_event(e)]
+    log.info("NOW24 after junk filter: %s -> %s", pre_junk, len(pool))
+
+    if cached:
+        core_in_pool = sum(1 for e in pool if is_now24_core_headline_sport(e))
+        if core_in_pool < 2:
+            added = 0
+            for e in cached:
+                if is_now24_junk_event(e):
+                    continue
+                if not is_in_next24_window(e, log_checks=False):
+                    continue
+                if not is_now24_core_headline_sport(e):
+                    continue
+                pool.append(e)
+                added += 1
+            if added:
+                pool = dedupe_events(pool, log_prefix="now24_core_backfill", exact=True)
+                sources.append(f"core_backfill=+{added}")
 
     if cached and not any(is_now24_headline_sport(e) for e in pool):
         for e in cached:
