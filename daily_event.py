@@ -246,7 +246,7 @@ def _select_now24_balanced(
         key=lambda e: event_start_datetime_vn(e) or datetime.max.replace(tzinfo=TZ),
     )
 
-    from now24_quality import is_now24_headline_sport
+    from now24_quality import is_now24_core_headline_sport
 
     headline_in = [e for e in candidates if is_now24_core_headline_sport(e)]
     if headline_in:
